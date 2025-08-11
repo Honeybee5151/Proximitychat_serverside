@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using WorldServer.core;
+using WorldServer.networking.packets.outgoing;
 
 namespace WorldServer.networking
 {
@@ -33,38 +34,74 @@ namespace WorldServer.networking
             gameServer = server;
         }
         
-        public async Task HandleVoiceClient(TcpClient client)
+public async Task HandleVoiceClient(TcpClient client)
+{
+    var stream = client.GetStream();
+    string clientPlayerId = null;
+    
+    try
+    {
+        while (client.Connected)
         {
-            var buffer = new byte[8192];
-            var stream = client.GetStream();
-            string clientPlayerId = null;
+            // Read 4-byte length header
+            var lengthBuffer = new byte[4];
+            int lengthBytesRead = 0;
             
-            try
+            while (lengthBytesRead < 4)
             {
-                while (client.Connected)
-                {
-                    int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
-                    if (bytesRead > 0)
-                    {
-                        string message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                        clientPlayerId = await ProcessVoiceMessage(message, client);
-                    }
-                }
+                int bytesRead = await stream.ReadAsync(lengthBuffer, lengthBytesRead, 4 - lengthBytesRead);
+                if (bytesRead == 0) break;
+                lengthBytesRead += bytesRead;
             }
-            catch (Exception ex)
+            
+            if (lengthBytesRead < 4) break;
+            
+            // Parse length using consistent byte order (little-endian)
+            int messageLength = lengthBuffer[0] | 
+                              (lengthBuffer[1] << 8) | 
+                              (lengthBuffer[2] << 16) | 
+                              (lengthBuffer[3] << 24);
+            
+            Console.WriteLine($"DEBUG: Received length header: {lengthBuffer[0]},{lengthBuffer[1]},{lengthBuffer[2]},{lengthBuffer[3]} = {messageLength} bytes");
+            
+            if (messageLength > 100000 || messageLength < 0) // 100KB safety limit
             {
-                Console.WriteLine($"Voice client error: {ex.Message}");
+                Console.WriteLine($"Invalid message length: {messageLength} bytes, disconnecting client");
+                break;
             }
-            finally
+            
+            // Read the actual message
+            var messageBuffer = new byte[messageLength];
+            int messageBytesRead = 0;
+            
+            while (messageBytesRead < messageLength)
             {
-                // Remove client from connections when they disconnect
-                if (clientPlayerId != null && voiceConnections.ContainsKey(clientPlayerId))
-                {
-                    voiceConnections.TryRemove(clientPlayerId, out _);
-                }
-                client.Close();
+                int bytesRead = await stream.ReadAsync(messageBuffer, messageBytesRead, messageLength - messageBytesRead);
+                if (bytesRead == 0) break;
+                messageBytesRead += bytesRead;
             }
+            
+            if (messageBytesRead < messageLength) break;
+            
+            string message = Encoding.UTF8.GetString(messageBuffer, 0, messageLength);
+            Console.WriteLine($"DEBUG: Received complete message, {messageLength} bytes");
+            
+            clientPlayerId = await ProcessVoiceMessage(message, client);
         }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Voice client error: {ex.Message}");
+    }
+    finally
+    {
+        if (clientPlayerId != null && voiceConnections.ContainsKey(clientPlayerId))
+        {
+            voiceConnections.TryRemove(clientPlayerId, out _);
+        }
+        client.Close();
+    }
+}
         
         private async Task<string> ProcessVoiceMessage(string message, TcpClient sender)
         {
@@ -308,29 +345,23 @@ namespace WorldServer.networking
             }
         }
         
-        private async Task SendGamePacketToClient(object client, string packetData)
+        private async Task SendGamePacketToClient(Client gameClient, string packetData)
         {
             try
             {
-                // You'll need to adapt this to your server's packet sending system
-                // This is a placeholder - you'll need to use your existing packet infrastructure
-                
-                // Example approach:
-                // 1. Create a custom packet type for proximity voice
-                // 2. Send it through the existing game connection
-                // 3. ActionScript client receives it and plays the audio
-                
-                Console.WriteLine($"Would send packet to client: {packetData}");
-                
-                // TODO: Implement actual packet sending using your server's packet system
-                // This might involve:
-                // - Creating a ProximityVoicePacket class
-                // - Using your existing packet sending infrastructure
-                // - Sending to the client's game connection
+                // Create a proximity voice packet using your existing packet system
+                // You'll need to create this packet type that ActionScript can handle
+        
+                // Option 1: Send as a custom packet
+                var voicePacket = new ProximityVoicePacket(packetData);
+                gameClient.SendPacket(voicePacket);
+        
+                // Option 2: Send as a text message (temporary solution)
+                // gameClient.SendMessage("PROXIMITY_VOICE", packetData);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error sending game packet: {ex.Message}");
+                Console.WriteLine($"Error sending voice packet to client: {ex.Message}");
             }
         }
         
@@ -353,7 +384,7 @@ namespace WorldServer.networking
     public class VoicePlayerInfo 
     {
         public string PlayerId { get; set; }
-        public object Client { get; set; } // Your Client type
+        public Client Client { get; set; } // Your Client type
         public float Distance { get; set; }
     }
 }
