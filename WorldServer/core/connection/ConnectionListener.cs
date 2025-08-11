@@ -94,6 +94,7 @@ namespace WorldServer.core.connection
         private ClientPool ClientPool;
         private SocketAsyncEventArgsPool EventArgsPoolAccept;
         private Semaphore MaxConnectionsEnforcer;
+        //777592
         private VoiceHandler voiceHandler;
 
         public ConnectionListener(GameServer gameServer)
@@ -107,6 +108,7 @@ namespace WorldServer.core.connection
             EventArgsPoolAccept = new SocketAsyncEventArgsPool(MAX_SIMULTANEOUS_ACCEPT_OPS);
             ClientPool = new ClientPool(MaxConnections + 1);
             MaxConnectionsEnforcer = new Semaphore(MaxConnections, MaxConnections);
+            //777592
             voiceHandler = new VoiceHandler(gameServer);
         }
 
@@ -137,6 +139,7 @@ namespace WorldServer.core.connection
             ListenSocket.Listen(BACKLOG);
 
             StartAccept();
+            //777592
             _ = Task.Run(StartVoiceListener);
         }
 
@@ -148,6 +151,7 @@ namespace WorldServer.core.connection
             acceptEventArg.Completed += AcceptEventArg_Completed;
             return acceptEventArg;
         }
+        //777592
         private async Task StartVoiceListener()
         {
             var voiceListener = new TcpListener(IPAddress.Any, 2051);

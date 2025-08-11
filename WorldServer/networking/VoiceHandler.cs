@@ -1,4 +1,5 @@
-﻿using System;
+﻿//777592
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -96,8 +97,43 @@ namespace WorldServer.networking
                 else if (message.StartsWith("VOICE_CONNECT:"))
                 {
                     // Handle initial connection - player identifying themselves
-                    var playerId = message.Substring("VOICE_CONNECT:".Length);
+                    // Format: VOICE_CONNECT:playerID:voiceID
+                    var parts = message.Substring("VOICE_CONNECT:".Length).Split(':');
+                    if (parts.Length < 2)
+                    {
+                        Console.WriteLine("Invalid voice connect format - missing voiceID");
+                        sender.Close();
+                        return null;
+                    }
+    
+                    var playerId = parts[0];
+                    var voiceId = parts[1];
+    
+                    // Validate VoiceID belongs to this player
+                    if (!ValidateVoiceID(playerId, voiceId))
+                    {
+                        Console.WriteLine($"SECURITY: Invalid VoiceID for player {playerId}");
+                        sender.Close();
+                        return null;
+                    }
+    
+                    // Check if player is actually in game
+                    if (!VerifyPlayerSession(playerId))
+                    {
+                        Console.WriteLine($"SECURITY: Player {playerId} not in active game session");
+                        sender.Close();
+                        return null;
+                    }
+    
+                    // Check for duplicate connections
+                    if (voiceConnections.ContainsKey(playerId))
+                    {
+                        Console.WriteLine($"SECURITY: Closing duplicate voice connection for player {playerId}");
+                        voiceConnections[playerId].Close(); // Close old connection
+                    }
+    
                     voiceConnections[playerId] = sender;
+                    Console.WriteLine($"Voice connection established for player {playerId}");
                     return playerId;
                 }
             }
@@ -143,7 +179,45 @@ namespace WorldServer.networking
                 return null;
             }
         }
-        
+        private bool ValidateVoiceID(string playerId, string voiceId)
+        {
+            try
+            {
+                // Get the account from database and check VoiceID matches
+                var account = gameServer.Database.GetAccount(int.Parse(playerId));
+                return account != null && account.VoiceID == voiceId;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error validating VoiceID: {ex.Message}");
+                return false;
+            }
+        }
+        private bool VerifyPlayerSession(string playerId)
+        {
+            try
+            {
+                // Check if player is actually logged into the game server
+                var clients = gameServer.ConnectionManager.Clients;
+                foreach (var clientPair in clients)
+                {
+                    var client = clientPair.Key;
+                    if (client.Player?.AccountId.ToString() == playerId && 
+                        client.Socket?.Connected == true && 
+                        client.Player.World != null)
+
+                    {
+                        return true;
+                    }
+                }
+                return false; // Player not found or not actively playing
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error verifying player session: {ex.Message}");
+                return false;
+            }
+        }
         private VoicePlayerInfo [] GetPlayersInRange(float speakerX, float speakerY, float range)
         {
             try
