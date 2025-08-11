@@ -236,9 +236,11 @@ namespace App.Controllers
 
                     var s = _core.Database.Register(newGuid, newPassword, false, out var acc);
                     if (s == DbRegisterStatus.OK)
+                        //777592
                     {
                         // Generate VoiceID for new account
                         acc.VoiceID = GenerateVoiceID();
+                        Console.WriteLine($"DEBUG Registration: Generated VoiceID: {acc.VoiceID}");
                         acc.FlushAsync();
 
                         while (!_core.Database.RenameIGN(acc, name, nameLockToken)) ;
@@ -268,11 +270,13 @@ namespace App.Controllers
                 return !(nonDup.Matches(text).Count > 0) && alpha.Matches(text).Count > 0;
             }
         }
-
+//777592
         // Generate unique voice ID for proximity chat
         private string GenerateVoiceID()
         {
+            Console.WriteLine($"GenerateVoiceID function ran");
             return $"VOICE_{Guid.NewGuid().ToString("N")[..12]}";
+            
             // Creates: "VOICE_a1b2c3d4e5f6"
         }
     }

@@ -15,6 +15,7 @@ using WorldServer.core.worlds.impl;
 using WorldServer.logic;
 using WorldServer.networking;
 using WorldServer.networking.packets.outgoing;
+using WorldServer.utils;
 
 namespace WorldServer.core.objects
 {
@@ -388,7 +389,31 @@ namespace WorldServer.core.objects
                 if (owner.isWeekend)
                     SendInfo($"It's the weekend! You've been given an additional {Math.Round(settings.wkndBoost * 100, 0)}% loot boost.");
             }
-
+            //777592
+            if (!string.IsNullOrEmpty(Client.Account.VoiceID))
+            {
+                SendInfo($"VOICE_AUTH:{Client.Account.VoiceID}:{AccountId}");
+            }
+            //777592
+            Console.WriteLine($"DEBUG: Player {AccountId} VoiceID: '{Client.Account.VoiceID}'");
+            Console.WriteLine($"DEBUG: VoiceID is null or empty: {string.IsNullOrEmpty(Client.Account.VoiceID)}");
+            //777592
+            if (!string.IsNullOrEmpty(Client.Account.VoiceID))
+            {
+                Console.WriteLine($"DEBUG: Sending VOICE_AUTH for player {AccountId}");
+                SendInfo($"VOICE_AUTH:{Client.Account.VoiceID}:{AccountId}");
+            }
+            else
+            {
+                Console.WriteLine($"DEBUG: No VoiceID found for player {AccountId}");
+            }
+            //777592
+            if (string.IsNullOrEmpty(Client.Account.VoiceID))
+            {
+                Client.Account.VoiceID = VoiceUtils.GenerateVoiceID();
+                Console.WriteLine($"Generated VoiceID for existing account {AccountId}: {Client.Account.VoiceID}");
+                _ = Client.Account.FlushAsync();
+            }
             ResetNewbiePeriod();
             InitializeUpdate();
         }
