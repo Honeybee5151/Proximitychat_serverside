@@ -46,7 +46,7 @@ namespace WorldServer.core
         public DateTime RestartCloseTime { get; private set; }
       //777592
         
-        public VoiceHandler VoiceHandler { get; private set; }
+        //public VoiceHandler VoiceHandler { get; private set; }
 
         public GameServer(string[] appArgs)
         {
@@ -83,7 +83,7 @@ namespace WorldServer.core
             InterServerManager = new ISManager(Database.Subscriber, Configuration);
             WorldManager = new WorldManager(this);
             //777592
-            VoiceHandler = new VoiceHandler(this); 
+            //VoiceHandler = new VoiceHandler(this); 
             
             var isDocker = Environment.GetEnvironmentVariable("IS_DOCKER") != null;
 			SignalListener = isDocker ? new SignalListenerLinux(this) : new SignalListenerWindows(this);
@@ -134,7 +134,7 @@ namespace WorldServer.core
             MarketSweeper.Start();
             ConnectionListener.Start();
             //777592
-            _ = Task.Run(StartVoiceListener); 
+            //_ = Task.Run(StartVoiceListener); 
             InterServerManager.JoinNetwork();
 
             var timeout = TimeSpan.FromHours(Configuration.serverSettings.restartTime);
@@ -185,6 +185,7 @@ namespace WorldServer.core
             Thread.Sleep(10000);
         }
         //777592
+        /*
         private async Task StartVoiceListener()
         {
             try 
@@ -205,6 +206,7 @@ namespace WorldServer.core
                 Log.Error($"Voice listener error: {ex.Message}");
             }
         }
+        */
         public void Stop()
         {
             if (!Running)

@@ -33,6 +33,8 @@ namespace Shared
         public PlayerList playerList { get; set; } = new PlayerList();
         public int players { get; set; } = 0;
         public int port { get; set; } = 2050;
+        //777592 
+        public int port2 { get; set; } = 2051;
         public ServerType type { get; set; } = ServerType.Account;
 
         public bool IsJustStarted() => players == 0 && maxPlayers == 0;
