@@ -8,7 +8,10 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net.Sockets;
 using System.Threading;
+using System.Threading.Tasks;
+using Org.BouncyCastle.Utilities.Net;
 using WorldServer.core.commands;
 using WorldServer.core.connection;
 using WorldServer.core.miscfile;
@@ -16,6 +19,8 @@ using WorldServer.core.objects.vendors;
 using WorldServer.core.worlds;
 using WorldServer.logic;
 using WorldServer.logic.loot;
+using WorldServer.networking;
+using System.Net;
 using WorldServer.utils;
 
 namespace WorldServer.core
@@ -39,6 +44,9 @@ namespace WorldServer.core
         public SignalListener SignalListener { get; private set; }
         private bool Running { get; set; } = true;
         public DateTime RestartCloseTime { get; private set; }
+      //777592
+        
+        public VoiceHandler VoiceHandler { get; private set; }
 
         public GameServer(string[] appArgs)
         {
@@ -74,6 +82,8 @@ namespace WorldServer.core
 
             InterServerManager = new ISManager(Database.Subscriber, Configuration);
             WorldManager = new WorldManager(this);
+            //777592
+            VoiceHandler = new VoiceHandler(this); 
             
             var isDocker = Environment.GetEnvironmentVariable("IS_DOCKER") != null;
 			SignalListener = isDocker ? new SignalListenerLinux(this) : new SignalListenerWindows(this);
@@ -123,6 +133,8 @@ namespace WorldServer.core
             ConnectionListener.Initialize();
             MarketSweeper.Start();
             ConnectionListener.Start();
+            //777592
+            _ = Task.Run(StartVoiceListener); 
             InterServerManager.JoinNetwork();
 
             var timeout = TimeSpan.FromHours(Configuration.serverSettings.restartTime);
@@ -172,7 +184,27 @@ namespace WorldServer.core
             Log.Info("Program has been terminated.");
             Thread.Sleep(10000);
         }
+        //777592
+        private async Task StartVoiceListener()
+        {
+            try 
+            {
+                var voiceListener = new TcpListener(System.Net.IPAddress.Any, 2051);
+                voiceListener.Start();
+                Log.Info("Voice listener started on port 2051");
 
+                while (Running)
+                {
+                    var client = await voiceListener.AcceptTcpClientAsync();
+                    Log.Info($"Voice client connected from {client.Client.RemoteEndPoint}");
+                    _ = Task.Run(() => VoiceHandler.HandleVoiceClient(client));
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"Voice listener error: {ex.Message}");
+            }
+        }
         public void Stop()
         {
             if (!Running)

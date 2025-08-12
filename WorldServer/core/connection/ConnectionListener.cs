@@ -140,7 +140,7 @@ namespace WorldServer.core.connection
 
             StartAccept();
             //777592
-            _ = Task.Run(StartVoiceListener);
+            //_ = Task.Run(StartVoiceListener);
         }
 
         private void AcceptEventArg_Completed(object sender, SocketAsyncEventArgs e) => ProcessAccept(e);
