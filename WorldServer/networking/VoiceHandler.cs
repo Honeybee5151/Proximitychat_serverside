@@ -321,61 +321,69 @@ public async Task HandleVoiceClient(TcpClient client)
             }
         }
         
-       private async Task BroadcastVoiceToNearbyPlayers(ChatMessage voiceData, VoicePlayerInfo[] nearbyPlayers, PlayerPosition speakerPosition)
-{
-    try
-    {
-        foreach (var nearbyPlayer in nearbyPlayers)
+      
+        private async Task BroadcastVoiceToNearbyPlayers(ChatMessage voiceData, VoicePlayerInfo[] nearbyPlayers, PlayerPosition speakerPosition)
         {
             try
             {
-                // Skip sending voice back to the speaker
-                //if (nearbyPlayer.PlayerId == voiceData.PlayerId)
-                   // continue;
-
-                // Check if players have each other ignored
-                if (ArePlayersVoiceIgnored(voiceData.PlayerId, nearbyPlayer.PlayerId))
+                foreach (var nearbyPlayer in nearbyPlayers)
                 {
-                    Console.WriteLine($"Voice blocked: {voiceData.PlayerId} <-> {nearbyPlayer.PlayerId} (ignored)");
-                    continue; // Skip this player
-                }
+                    try
+                    {
+                        // Check if players have each other ignored
+                        if (ArePlayersVoiceIgnored(voiceData.PlayerId, nearbyPlayer.PlayerId))
+                        {
+                            Console.WriteLine($"Voice blocked: {voiceData.PlayerId} <-> {nearbyPlayer.PlayerId} (ignored)");
+                            continue;
+                        }
                     
-                // Calculate volume based on distance (closer = louder)
-                float distanceVolume = Math.Max(0.1f, 1.0f - (nearbyPlayer.Distance / PROXIMITY_RANGE));
+                        // Calculate volume based on distance
+                        float distanceVolume = Math.Max(0.1f, 1.0f - (nearbyPlayer.Distance / PROXIMITY_RANGE));
                 
-                // Create packet with recipient-specific data
-                var recipientPacket = new
-                {
-                    PacketType = "PROXIMITY_VOICE",
-                    PlayerId = voiceData.PlayerId,
-                    PlayerName = voiceData.PlayerName,
-                    AudioData = Convert.ToBase64String(voiceData.AudioData),
-                    Volume = voiceData.Volume * distanceVolume,
-                    Distance = nearbyPlayer.Distance
-                };
+                        // FIXED: Keep audio as Base64 but don't double-encode the JSON
+                        var recipientPacket = new
+                        {
+                            PacketType = "PROXIMITY_VOICE",
+                            PlayerId = voiceData.PlayerId,
+                            PlayerName = voiceData.PlayerName,
+                            AudioData = Convert.ToBase64String(voiceData.AudioData), // Convert to Base64 string
+                            Volume = voiceData.Volume * distanceVolume,
+                            Distance = nearbyPlayer.Distance
+                        };
 
-// Send via the game connection
-                var packetJson = JsonSerializer.Serialize(recipientPacket);
-                Console.WriteLine($"DEBUG: Broadcasting voice - created JSON:");
-                Console.WriteLine($"DEBUG: JSON = '{packetJson}'");
-                Console.WriteLine($"DEBUG: JSON length = {packetJson.Length}");
-
-                await SendGamePacketToClient(nearbyPlayer.Client, packetJson);
+                        // Send the packet (this will serialize it once, properly)
+                        await SendVoicePacketToClient(nearbyPlayer.Client, recipientPacket);
                 
-                Console.WriteLine($"Sent voice from {voiceData.PlayerId} to {nearbyPlayer.PlayerId} (distance: {nearbyPlayer.Distance:F1})");
+                        Console.WriteLine($"Sent voice from {voiceData.PlayerId} to {nearbyPlayer.PlayerId} (distance: {nearbyPlayer.Distance:F1})");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error sending voice to player {nearbyPlayer.PlayerId}: {ex.Message}");
+                    }
+                }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error sending voice to player {nearbyPlayer.PlayerId}: {ex.Message}");
+                Console.WriteLine($"Error broadcasting voice: {ex.Message}");
             }
         }
-    }
-    catch (Exception ex)
+    private async Task SendVoicePacketToClient(Client gameClient, object voicePacketData)
     {
-        Console.WriteLine($"Error broadcasting voice: {ex.Message}");
-    }
-}
+        try
+        {
+            // Serialize the voice data object to JSON string properly
+            var jsonString = JsonSerializer.Serialize(voicePacketData);
         
+            // Create packet with the JSON string
+            var voicePacket = new ProximityVoicePacket(jsonString);
+            gameClient.SendPacket(voicePacket);
+            Console.WriteLine($"DEBUG: Voice packet sent successfully to client");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error sending voice packet to client: {ex.Message}");
+        }
+    }
 private async Task SendGamePacketToClient(Client gameClient, string packetData)
 {
     try
