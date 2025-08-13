@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
+using Shared.database.account;
 using WorldServer.core;
 using WorldServer.networking.packets.outgoing;
 
@@ -33,7 +34,33 @@ namespace WorldServer.networking
         {
             gameServer = server;
         }
+        private bool ArePlayersVoiceIgnored(string speakerId, string listenerId)
+        {
+            try
+            {
+                // Get both player accounts
+                var speakerAccount = gameServer.Database.GetAccount(int.Parse(speakerId));
+                var listenerAccount = gameServer.Database.GetAccount(int.Parse(listenerId));
         
+                if (speakerAccount == null || listenerAccount == null)
+                    return false;
+
+                // Check if listener has speaker ignored (listener won't hear speaker)
+                bool listenerIgnoresSpeaker = listenerAccount.IgnoreList.Contains(speakerAccount.AccountId);
+        
+                // Check if speaker has listener ignored (speaker's voice won't go to listener)
+                bool speakerIgnoresListener = speakerAccount.IgnoreList.Contains(listenerAccount.AccountId);
+        
+                // Block voice if either player ignores the other
+                return listenerIgnoresSpeaker || speakerIgnoresListener;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error checking voice ignore status: {ex.Message}");
+                return false; // Default to allowing voice if error
+            }
+        }
+       
 public async Task HandleVoiceClient(TcpClient client)
 
 {
@@ -294,60 +321,56 @@ public async Task HandleVoiceClient(TcpClient client)
             }
         }
         
-        private async Task BroadcastVoiceToNearbyPlayers(ChatMessage voiceData, VoicePlayerInfo[] nearbyPlayers, PlayerPosition speakerPosition)
+       private async Task BroadcastVoiceToNearbyPlayers(ChatMessage voiceData, VoicePlayerInfo[] nearbyPlayers, PlayerPosition speakerPosition)
+{
+    try
+    {
+        foreach (var nearbyPlayer in nearbyPlayers)
         {
             try
             {
-                // Create proximity voice packet for ActionScript clients
-                var proximityVoicePacket = new
+                // Skip sending voice back to the speaker
+                if (nearbyPlayer.PlayerId == voiceData.PlayerId)
+                    continue;
+
+                // Check if players have each other ignored
+                if (ArePlayersVoiceIgnored(voiceData.PlayerId, nearbyPlayer.PlayerId))
+                {
+                    Console.WriteLine($"Voice blocked: {voiceData.PlayerId} <-> {nearbyPlayer.PlayerId} (ignored)");
+                    continue; // Skip this player
+                }
+                    
+                // Calculate volume based on distance (closer = louder)
+                float distanceVolume = Math.Max(0.1f, 1.0f - (nearbyPlayer.Distance / PROXIMITY_RANGE));
+                
+                // Create packet with recipient-specific data
+                var recipientPacket = new
                 {
                     PacketType = "PROXIMITY_VOICE",
                     PlayerId = voiceData.PlayerId,
                     PlayerName = voiceData.PlayerName,
                     AudioData = Convert.ToBase64String(voiceData.AudioData),
-                    Volume = voiceData.Volume,
-                    Distance = 0f // Will be calculated per recipient
+                    Volume = voiceData.Volume * distanceVolume,
+                    Distance = nearbyPlayer.Distance
                 };
                 
-                foreach (var nearbyPlayer in nearbyPlayers)
-                {
-                    try
-                    {
-                        // Skip sending voice back to the speaker
-                        if (nearbyPlayer.PlayerId == voiceData.PlayerId)
-                            continue;
-                            
-                        // Calculate volume based on distance (closer = louder)
-                        float distanceVolume = Math.Max(0.1f, 1.0f - (nearbyPlayer.Distance / PROXIMITY_RANGE));
-                        
-                        // Update packet with recipient-specific data
-                        var recipientPacket = new
-                        {
-                            PacketType = "PROXIMITY_VOICE",
-                            PlayerId = voiceData.PlayerId,
-                            PlayerName = voiceData.PlayerName,
-                            AudioData = Convert.ToBase64String(voiceData.AudioData),
-                            Volume = voiceData.Volume * distanceVolume,
-                            Distance = nearbyPlayer.Distance
-                        };
-                        
-                        // Send via the game connection (you'll need to adapt this to your packet system)
-                        var packetJson = JsonSerializer.Serialize(recipientPacket);
-                        await SendGamePacketToClient(nearbyPlayer.Client, packetJson);
-                        
-                        Console.WriteLine($"Sent voice from {voiceData.PlayerId} to {nearbyPlayer.PlayerId} (distance: {nearbyPlayer.Distance:F1})");
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Error sending voice to player {nearbyPlayer.PlayerId}: {ex.Message}");
-                    }
-                }
+                // Send via the game connection
+                var packetJson = JsonSerializer.Serialize(recipientPacket);
+                await SendGamePacketToClient(nearbyPlayer.Client, packetJson);
+                
+                Console.WriteLine($"Sent voice from {voiceData.PlayerId} to {nearbyPlayer.PlayerId} (distance: {nearbyPlayer.Distance:F1})");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error broadcasting voice: {ex.Message}");
+                Console.WriteLine($"Error sending voice to player {nearbyPlayer.PlayerId}: {ex.Message}");
             }
         }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error broadcasting voice: {ex.Message}");
+    }
+}
         
         private async Task SendGamePacketToClient(Client gameClient, string packetData)
         {
