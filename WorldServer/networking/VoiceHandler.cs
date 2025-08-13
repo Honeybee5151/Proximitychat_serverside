@@ -330,8 +330,8 @@ public async Task HandleVoiceClient(TcpClient client)
             try
             {
                 // Skip sending voice back to the speaker
-                if (nearbyPlayer.PlayerId == voiceData.PlayerId)
-                    continue;
+                //if (nearbyPlayer.PlayerId == voiceData.PlayerId)
+                   // continue;
 
                 // Check if players have each other ignored
                 if (ArePlayersVoiceIgnored(voiceData.PlayerId, nearbyPlayer.PlayerId))
@@ -353,9 +353,13 @@ public async Task HandleVoiceClient(TcpClient client)
                     Volume = voiceData.Volume * distanceVolume,
                     Distance = nearbyPlayer.Distance
                 };
-                
-                // Send via the game connection
+
+// Send via the game connection
                 var packetJson = JsonSerializer.Serialize(recipientPacket);
+                Console.WriteLine($"DEBUG: Broadcasting voice - created JSON:");
+                Console.WriteLine($"DEBUG: JSON = '{packetJson}'");
+                Console.WriteLine($"DEBUG: JSON length = {packetJson.Length}");
+
                 await SendGamePacketToClient(nearbyPlayer.Client, packetJson);
                 
                 Console.WriteLine($"Sent voice from {voiceData.PlayerId} to {nearbyPlayer.PlayerId} (distance: {nearbyPlayer.Distance:F1})");
@@ -372,25 +376,33 @@ public async Task HandleVoiceClient(TcpClient client)
     }
 }
         
-        private async Task SendGamePacketToClient(Client gameClient, string packetData)
+private async Task SendGamePacketToClient(Client gameClient, string packetData)
+{
+    try
+    {
+        Console.WriteLine($"DEBUG: SendGamePacketToClient called");
+        Console.WriteLine($"DEBUG: packetData = '{packetData}'");
+        Console.WriteLine($"DEBUG: packetData length = {packetData?.Length ?? 0}");
+        
+        if (string.IsNullOrEmpty(packetData))
         {
-            try
-            {
-                // Create a proximity voice packet using your existing packet system
-                // You'll need to create this packet type that ActionScript can handle
-        
-                // Option 1: Send as a custom packet
-                var voicePacket = new ProximityVoicePacket(packetData);
-                gameClient.SendPacket(voicePacket);
-        
-                // Option 2: Send as a text message (temporary solution)
-                // gameClient.SendMessage("PROXIMITY_VOICE", packetData);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error sending voice packet to client: {ex.Message}");
-            }
+            Console.WriteLine($"WARNING: packetData is null or empty!");
+            return;
         }
+
+        // Create a proximity voice packet using your existing packet system
+        var voicePacket = new ProximityVoicePacket(packetData);
+        Console.WriteLine($"DEBUG: Created ProximityVoicePacket");
+        
+        gameClient.SendPacket(voicePacket);
+        Console.WriteLine($"DEBUG: Packet sent successfully to client");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error sending voice packet to client: {ex.Message}");
+        Console.WriteLine($"Stack trace: {ex.StackTrace}");
+    }
+}
         
         private float CalculateDistance(float x1, float y1, float x2, float y2)
         {

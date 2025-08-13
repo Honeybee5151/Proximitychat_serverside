@@ -16,7 +16,7 @@ namespace WorldServer.networking.packets.outgoing
 
         public override void Write(NetworkWriter wtr)
         {
-            wtr.Write(VoiceData); // Use Write instead of WriteUTF
+            wtr.WriteUTF16(VoiceData);
         }
     }
 }
