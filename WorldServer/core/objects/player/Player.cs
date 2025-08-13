@@ -23,12 +23,13 @@ namespace WorldServer.core.objects
     {
         void Damage(int dmg, Entity src);
         bool IsVisibleToEnemy();
+        
     }
 
     public partial class Player : Character, IContainer, IPlayer
     {
         public Client Client { get; private set; }
-
+        private bool _voiceAuthSent = false;
         public bool ShowDeltaTimeLog { get; set; }
         public FameCounter FameCounter { get; private set; }
         public ConcurrentQueue<InboundBuffer> IncomingMessages { get; private set; } = new ConcurrentQueue<InboundBuffer>();
@@ -390,9 +391,27 @@ namespace WorldServer.core.objects
                     SendInfo($"It's the weekend! You've been given an additional {Math.Round(settings.wkndBoost * 100, 0)}% loot boost.");
             }
             //777592
-            if (!string.IsNullOrEmpty(Client.Account.VoiceID))
+            if (!_voiceAuthSent && !string.IsNullOrEmpty(Client.Account.VoiceID))
             {
-                SendInfo($"VOICE_AUTH:{Client.Account.VoiceID}:{AccountId}");
+                Console.WriteLine($"DEBUG: Sending VOICE_AUTH for player {AccountId}");
+
+                var textPacket = new Text()
+                {
+                    Name = "Server",
+                    ObjectId = -1,
+                    NumStars = 0,
+                    BubbleTime = 0,
+                    Recipient = "",
+                    Txt = $"VOICE_AUTH:{Client.Account.VoiceID}:{AccountId}",
+                    CleanText = "",
+                    NameColor = 0,
+                    TextColor = 0
+                };
+
+                Client.SendPacket(textPacket);
+                _voiceAuthSent = true; // Mark as sent so it won't send again
+
+                Console.WriteLine($"DEBUG: Sent VOICE_AUTH packet to player {AccountId}");
             }
             //777592
             Console.WriteLine($"DEBUG: Player {AccountId} VoiceID: '{Client.Account.VoiceID}'");
