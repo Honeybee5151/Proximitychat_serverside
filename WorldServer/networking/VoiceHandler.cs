@@ -35,7 +35,9 @@ namespace WorldServer.networking
         }
         
 public async Task HandleVoiceClient(TcpClient client)
+
 {
+    Console.WriteLine($"DEBUG_VOICE: HandleVoiceClient called from {client.Client.RemoteEndPoint}");
     var stream = client.GetStream();
     string clientPlayerId = null;
     
@@ -87,6 +89,7 @@ public async Task HandleVoiceClient(TcpClient client)
             Console.WriteLine($"DEBUG: Received complete message, {messageLength} bytes");
             
             clientPlayerId = await ProcessVoiceMessage(message, client);
+            
         }
     }
     catch (Exception ex)
@@ -105,6 +108,7 @@ public async Task HandleVoiceClient(TcpClient client)
         
         private async Task<string> ProcessVoiceMessage(string message, TcpClient sender)
         {
+            Console.WriteLine($"DEBUG_VOICE: ProcessVoiceMessage called with: {message.Substring(0, Math.Min(20, message.Length))}");
             try
             {
                 if (message.StartsWith("VOICE_DATA:"))

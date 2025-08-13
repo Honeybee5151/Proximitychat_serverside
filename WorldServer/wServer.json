@@ -8,7 +8,7 @@
     "serverInfo": {
         "type": "World",
         "name": "Netherlands",
-        "address": "46.62.153.92",
+        "address": "46.62.153.92\n",
         "port": 2050,
         "coordinates": {
             "latitude": 0,

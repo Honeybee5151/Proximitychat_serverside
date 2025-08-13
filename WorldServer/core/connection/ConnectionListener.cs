@@ -4,7 +4,6 @@ using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using WorldServer.networking;
-
 using WorldServer.utils;
 
 namespace WorldServer.core.connection
@@ -110,17 +109,11 @@ namespace WorldServer.core.connection
             MaxConnectionsEnforcer = new Semaphore(MaxConnections, MaxConnections);
             //777592
             voiceHandler = new VoiceHandler(gameServer);
-            //777592
-            Port2 = 2051;
-            
         }
 
         private Socket ListenSocket { get; set; }
         private int MaxConnections { get; }
         private int Port { get; }
-        //777592
-        private int Port2 { get; }
-        private Socket ListenSocket2 { get; set; }
 
         public void Initialize()
         {
@@ -139,33 +132,19 @@ namespace WorldServer.core.connection
 
         public void Start()
         {
+            // Start main game server listener
             var localEndPoint = new IPEndPoint(IPAddress.Any, Port);
             ListenSocket = new Socket(localEndPoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
             ListenSocket.Bind(localEndPoint);
             ListenSocket.Listen(BACKLOG);
-
             StartAccept();
-            
-            var localEndPoint2 = new IPEndPoint(IPAddress.Any, Port2);
-            ListenSocket2 = new Socket(localEndPoint2.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
-            ListenSocket2.Bind(localEndPoint2);
-            ListenSocket2.Listen(BACKLOG);
+
+            // Start voice handler on port 2051
             //777592
-            
-            StartAccept2();
-            //777592
+            Console.WriteLine("=== DEBUG: Starting voice listener on port 2051 ===");
             _ = Task.Run(StartVoiceListener);
         }
-
-        private void AcceptEventArg_Completed(object sender, SocketAsyncEventArgs e) => ProcessAccept(e);
-
-        private SocketAsyncEventArgs CreateNewAcceptEventArgs()
-        {
-            var acceptEventArg = new SocketAsyncEventArgs();
-            acceptEventArg.Completed += AcceptEventArg_Completed;
-            return acceptEventArg;
-        }
-        //777592
+//777592
         private async Task StartVoiceListener()
         {
             Console.WriteLine("=== DEBUG: StartVoiceListener called! ===");
@@ -180,18 +159,37 @@ namespace WorldServer.core.connection
         
                 Console.WriteLine("=== DEBUG: Voice listener started successfully! ===");
 
-                while (true)  // Use ListenSocket as condition
+                while (true)
                 {
-                    var client = await voiceListener.AcceptTcpClientAsync();
-                    Console.WriteLine($"Voice client connected from {client.Client.RemoteEndPoint}");
-                    _ = Task.Run(() => voiceHandler.HandleVoiceClient(client));
+                    try
+                    {
+                        var client = await voiceListener.AcceptTcpClientAsync();
+                        Console.WriteLine($"=== DEBUG: Voice client connected from {client.Client.RemoteEndPoint} ===");
+                        _ = Task.Run(() => voiceHandler.HandleVoiceClient(client));
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Server is shutting down
+                        break;
+                    }
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"=== DEBUG: Voice listener FAILED: {ex.Message} ===");
+                Console.WriteLine($"=== DEBUG: Stack trace: {ex.StackTrace} ===");
             }
         }
+
+        private void AcceptEventArg_Completed(object sender, SocketAsyncEventArgs e) => ProcessAccept(e);
+
+        private SocketAsyncEventArgs CreateNewAcceptEventArgs()
+        {
+            var acceptEventArg = new SocketAsyncEventArgs();
+            acceptEventArg.Completed += AcceptEventArg_Completed;
+            return acceptEventArg;
+        }
+
         private SocketAsyncEventArgs CreateNewReceiveEventArgs()
         {
             var eventArgs = new SocketAsyncEventArgs();
@@ -246,67 +244,7 @@ namespace WorldServer.core.connection
 
             StartAccept();
         }
-//777592
-        private void StartAccept2()
-        {
-            SocketAsyncEventArgs acceptEventArg;
 
-            if (EventArgsPoolAccept.Count > 1)
-                try
-                {
-                    acceptEventArg = EventArgsPoolAccept.Pop();
-                }
-                catch
-                {
-                    acceptEventArg = CreateNewAcceptEventArgs2(); // Use separate event args for port 2051
-                }
-            else
-                acceptEventArg = CreateNewAcceptEventArgs2(); // Use separate event args for port 2051
-
-            _ = MaxConnectionsEnforcer.WaitOne();
-
-            try
-            {
-                var willRaiseEvent = ListenSocket2.AcceptAsync(acceptEventArg); // Use ListenSocket2
-                if (!willRaiseEvent)
-                    ProcessAccept2(acceptEventArg); // Use separate process method
-            }
-            catch
-            {
-            }
-        }
-
-//777592
-        private SocketAsyncEventArgs CreateNewAcceptEventArgs2()
-        {
-            var acceptEventArg = new SocketAsyncEventArgs();
-            acceptEventArg.Completed += AcceptEventArg2_Completed; // Separate event handler
-            return acceptEventArg;
-        }
-
-//777592
-        private void AcceptEventArg2_Completed(object sender, SocketAsyncEventArgs e) => ProcessAccept2(e);
-
-//777592
-        private void ProcessAccept2(SocketAsyncEventArgs acceptEventArgs)
-        {
-            if (acceptEventArgs.SocketError != SocketError.Success)
-            {
-                StartAccept2(); // Restart accept on port 2051
-                HandleBadAccept(acceptEventArgs);
-                return;
-            }
-
-            acceptEventArgs.AcceptSocket.NoDelay = true;
-    
-            // Handle voice connection differently - pass to voice handler
-            _ = Task.Run(() => voiceHandler.HandleVoiceClient(new TcpClient { Client = acceptEventArgs.AcceptSocket }));
-
-            acceptEventArgs.AcceptSocket = null;
-            EventArgsPoolAccept.Push(acceptEventArgs);
-
-            StartAccept2(); // Continue accepting on port 2051
-        }
         private void StartAccept()
         {
             SocketAsyncEventArgs acceptEventArg;
@@ -362,8 +300,6 @@ namespace WorldServer.core.connection
             }
             catch (SemaphoreFullException e)
             {
-                // This should happen only on server restart
-                // If it doesn't need to handle the problem somwhere else
                 StaticLogger.Instance.Error($"MaxConnectionsEnforcer.Release(): {e.StackTrace}");
             }
         }
