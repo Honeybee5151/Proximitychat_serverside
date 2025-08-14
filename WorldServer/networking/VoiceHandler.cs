@@ -30,6 +30,7 @@ namespace WorldServer.networking
         private readonly GameServer gameServer;
         private readonly ConcurrentDictionary<string, TcpClient> voiceConnections = new();
         private const float PROXIMITY_RANGE = 15.0f; // Tiles - adjust as needed
+        private readonly ConcurrentDictionary<int, VoicePrioritySettings> worldPrioritySettings = new();
         
         public VoiceHandler(GameServer server)
         {
@@ -323,48 +324,57 @@ public async Task HandleVoiceClient(TcpClient client)
         }
         
       
-        private async Task BroadcastVoiceToNearbyPlayers(ChatMessage voiceData, VoicePlayerInfo[] nearbyPlayers, PlayerPosition speakerPosition)
+       private async Task BroadcastVoiceToNearbyPlayers(ChatMessage voiceData, VoicePlayerInfo[] nearbyPlayers, PlayerPosition speakerPosition)
+{
+    try
+    {
+        // Get priority settings for this world
+        var prioritySettings = GetPrioritySettings(speakerPosition.WorldId);
+        bool prioritySystemActive = ShouldActivatePrioritySystem(speakerPosition.WorldId, nearbyPlayers.Length);
+
+        Console.WriteLine($"Priority system active: {prioritySystemActive} ({nearbyPlayers.Length} players nearby)");
+
+        foreach (var nearbyPlayer in nearbyPlayers)
         {
             try
             {
-                foreach (var nearbyPlayer in nearbyPlayers)
+                // Check if players have each other ignored
+                if (ArePlayersVoiceIgnored(voiceData.PlayerId, nearbyPlayer.PlayerId))
                 {
-                    try
-                    {
-                        // Don't send voice back to the speaker (prevents echo)
-                       // if (nearbyPlayer.PlayerId == voiceData.PlayerId)
-                        //{
-                           // Console.WriteLine($"Skipping self-echo for player {voiceData.PlayerId}");
-                           // continue;
-                       // }
-
-                        // Check if players have each other ignored
-                        if (ArePlayersVoiceIgnored(voiceData.PlayerId, nearbyPlayer.PlayerId))
-                        {
-                            Console.WriteLine($"Voice blocked: {voiceData.PlayerId} <-> {nearbyPlayer.PlayerId} (ignored)");
-                            continue;
-                        }
-    
-                        // Calculate volume based on distance
-                        float distanceVolume = Math.Max(0.1f, 1.0f - (nearbyPlayer.Distance / PROXIMITY_RANGE));
-
-                        // Send raw audio data directly to client's VoiceManager on port 2051
-                        await SendAudioToClient(nearbyPlayer.Client, voiceData.AudioData, voiceData.Volume * distanceVolume);
-
-                        Console.WriteLine($"Sent voice from {voiceData.PlayerId} to {nearbyPlayer.PlayerId} (distance: {nearbyPlayer.Distance:F1})");
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Error sending voice to player {nearbyPlayer.PlayerId}: {ex.Message}");
-                    }
+                    Console.WriteLine($"Voice blocked: {voiceData.PlayerId} <-> {nearbyPlayer.PlayerId} (ignored)");
+                    continue;
                 }
+
+                // Calculate base volume based on distance
+                float distanceVolume = Math.Max(0.1f, 1.0f - (nearbyPlayer.Distance / PROXIMITY_RANGE));
+                float finalVolume = voiceData.Volume * distanceVolume;
+
+                // Apply priority system if active
+                if (prioritySystemActive)
+                {
+                    bool hasPriority = HasVoicePriority(voiceData.PlayerId, nearbyPlayer.PlayerId, prioritySettings);
+                    float volumeMultiplier = prioritySettings.GetVolumeMultiplier(hasPriority);
+                    finalVolume *= volumeMultiplier;
+
+                    Console.WriteLine($"Player {voiceData.PlayerId} -> {nearbyPlayer.PlayerId}: Priority={hasPriority}, Volume={finalVolume:F2}");
+                }
+
+                // Send audio with calculated volume
+                await SendAudioToClient(nearbyPlayer.Client, voiceData.AudioData, finalVolume);
+
+                Console.WriteLine($"Sent voice from {voiceData.PlayerId} to {nearbyPlayer.PlayerId} (distance: {nearbyPlayer.Distance:F1}, volume: {finalVolume:F2})");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error broadcasting voice: {ex.Message}");
+                Console.WriteLine($"Error sending voice to player {nearbyPlayer.PlayerId}: {ex.Message}");
             }
         }
-
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error broadcasting voice: {ex.Message}");
+    }
+}
         private async Task SendAudioToClient(Client gameClient, byte[] audioData, float volume)
         {
             try
@@ -392,7 +402,56 @@ public async Task HandleVoiceClient(TcpClient client)
                 Console.WriteLine($"Error sending audio to client: {ex.Message}");
             }
         }
+        private VoicePrioritySettings GetPrioritySettings(int worldId)
+        {
+            return worldPrioritySettings.GetOrAdd(worldId, _ => new VoicePrioritySettings());
+        }
 
+        private bool ShouldActivatePrioritySystem(int worldId, int nearbyPlayerCount)
+        {
+            var settings = GetPrioritySettings(worldId);
+            if (!settings.EnablePriority) return false;
+    
+            // Default activation threshold of 8 players (you can make this configurable later)
+            int activationThreshold = 8;
+            return nearbyPlayerCount >= activationThreshold;
+        }
+
+        private bool HasVoicePriority(string playerId, string listenerId, VoicePrioritySettings settings)
+        {
+            try
+            {
+                int playerAccountId = int.Parse(playerId);
+        
+                // Check manual priority list
+                if (settings.HasManualPriority(playerAccountId))
+                    return true;
+
+                var playerAccount = gameServer.Database.GetAccount(playerAccountId);
+                var listenerAccount = gameServer.Database.GetAccount(int.Parse(listenerId));
+
+                if (playerAccount == null || listenerAccount == null)
+                    return false;
+
+                // Check guild priority
+                if (settings.GuildMembersGetPriority && playerAccount.GuildId > 0)
+                {
+                    if (playerAccount.GuildId == listenerAccount.GuildId)
+                        return true;
+                }
+
+                // Add locked player check here if you have that system
+                // if (settings.LockedPlayersGetPriority && playerAccount.IsLocked)
+                //     return true;
+
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error checking voice priority: {ex.Message}");
+                return false;
+            }
+        }
         private float CalculateDistance(float x1, float y1, float x2, float y2)
         {
             float dx = x1 - x2;

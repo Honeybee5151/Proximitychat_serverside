@@ -11,6 +11,8 @@ namespace WorldServer.networking
         public float NonPriorityVolume { get; set; } = 0.2f; // 20% volume (80% reduction)
         public bool GuildMembersGetPriority { get; set; } = true;
         public bool LockedPlayersGetPriority { get; set; } = true;
+
+        public int ActivationThreshold { get; set; } = 8;
         public HashSet<int> ManualPriorityList { get; set; } = new HashSet<int>();
 
         public VoicePrioritySettings()
@@ -47,6 +49,7 @@ namespace WorldServer.networking
         }
 
         // Clone settings (useful for database operations)
+        // Clone settings (useful for database operations)
         public VoicePrioritySettings Clone()
         {
             return new VoicePrioritySettings
@@ -57,10 +60,12 @@ namespace WorldServer.networking
                 NonPriorityVolume = this.NonPriorityVolume,
                 GuildMembersGetPriority = this.GuildMembersGetPriority,
                 LockedPlayersGetPriority = this.LockedPlayersGetPriority,
-                ManualPriorityList = new HashSet<int>(this.ManualPriorityList)
+                ManualPriorityList = new HashSet<int>(this.ManualPriorityList),
+                ActivationThreshold = this.ActivationThreshold
             };
         }
 
+        // Validate settings (ensure they're within reasonable bounds)
         // Validate settings (ensure they're within reasonable bounds)
         public void ValidateSettings()
         {
@@ -75,6 +80,11 @@ namespace WorldServer.networking
             // Ensure non-priority volume is between 0% and 100%
             if (NonPriorityVolume < 0.0f) NonPriorityVolume = 0.0f;
             if (NonPriorityVolume > 1.0f) NonPriorityVolume = 1.0f;
+
+            // ADD THESE LINES:
+            // Ensure activation threshold is reasonable
+            if (ActivationThreshold < 3) ActivationThreshold = 3;
+            if (ActivationThreshold > 30) ActivationThreshold = 30;
 
             // Trim manual priority list if it exceeds max
             while (ManualPriorityList.Count > MaxPriorityPlayers)
