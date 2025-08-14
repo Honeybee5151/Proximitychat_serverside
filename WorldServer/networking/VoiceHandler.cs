@@ -434,4 +434,4 @@ private async Task SendGamePacketToClient(Client gameClient, string packetData)
         public Client Client { get; set; } // Your Client type
         public float Distance { get; set; }
     }
-}
+} 
