@@ -422,13 +422,14 @@ public async Task HandleVoiceClient(TcpClient client)
             try
             {
                 int playerAccountId = int.Parse(playerId);
+                int listenerAccountId = int.Parse(listenerId);
         
                 // Check manual priority list
                 if (settings.HasManualPriority(playerAccountId))
                     return true;
 
                 var playerAccount = gameServer.Database.GetAccount(playerAccountId);
-                var listenerAccount = gameServer.Database.GetAccount(int.Parse(listenerId));
+                var listenerAccount = gameServer.Database.GetAccount(listenerAccountId);
 
                 if (playerAccount == null || listenerAccount == null)
                     return false;
@@ -440,9 +441,11 @@ public async Task HandleVoiceClient(TcpClient client)
                         return true;
                 }
 
-                // Add locked player check here if you have that system
-                // if (settings.LockedPlayersGetPriority && playerAccount.IsLocked)
-                //     return true;
+                // Check locked player priority - if listener has speaker locked, give speaker priority
+                if (settings.LockedPlayersGetPriority && listenerAccount.LockList.Contains(playerAccountId))
+                {
+                    return true;
+                }
 
                 return false;
             }
