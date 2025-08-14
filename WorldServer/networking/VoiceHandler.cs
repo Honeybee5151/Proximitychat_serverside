@@ -3,6 +3,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -330,30 +331,26 @@ public async Task HandleVoiceClient(TcpClient client)
                 {
                     try
                     {
+                        // Don't send voice back to the speaker (prevents echo)
+                       // if (nearbyPlayer.PlayerId == voiceData.PlayerId)
+                        //{
+                           // Console.WriteLine($"Skipping self-echo for player {voiceData.PlayerId}");
+                           // continue;
+                       // }
+
                         // Check if players have each other ignored
                         if (ArePlayersVoiceIgnored(voiceData.PlayerId, nearbyPlayer.PlayerId))
                         {
                             Console.WriteLine($"Voice blocked: {voiceData.PlayerId} <-> {nearbyPlayer.PlayerId} (ignored)");
                             continue;
                         }
-                    
+    
                         // Calculate volume based on distance
                         float distanceVolume = Math.Max(0.1f, 1.0f - (nearbyPlayer.Distance / PROXIMITY_RANGE));
-                
-                        // FIXED: Keep audio as Base64 but don't double-encode the JSON
-                        var recipientPacket = new
-                        {
-                            PacketType = "PROXIMITY_VOICE",
-                            PlayerId = voiceData.PlayerId,
-                            PlayerName = voiceData.PlayerName,
-                            AudioData = Convert.ToBase64String(voiceData.AudioData), // Convert to Base64 string
-                            Volume = voiceData.Volume * distanceVolume,
-                            Distance = nearbyPlayer.Distance
-                        };
 
-                        // Send the packet (this will serialize it once, properly)
-                        await SendVoicePacketToClient(nearbyPlayer.Client, recipientPacket);
-                
+                        // Send raw audio data directly to client's VoiceManager on port 2051
+                        await SendAudioToClient(nearbyPlayer.Client, voiceData.AudioData, voiceData.Volume * distanceVolume);
+
                         Console.WriteLine($"Sent voice from {voiceData.PlayerId} to {nearbyPlayer.PlayerId} (distance: {nearbyPlayer.Distance:F1})");
                     }
                     catch (Exception ex)
@@ -367,51 +364,35 @@ public async Task HandleVoiceClient(TcpClient client)
                 Console.WriteLine($"Error broadcasting voice: {ex.Message}");
             }
         }
-    private async Task SendVoicePacketToClient(Client gameClient, object voicePacketData)
-    {
-        try
+
+        private async Task SendAudioToClient(Client gameClient, byte[] audioData, float volume)
         {
-            // Serialize the voice data object to JSON string properly
-            var jsonString = JsonSerializer.Serialize(voicePacketData);
-        
-            // Create packet with the JSON string
-            var voicePacket = new ProximityVoicePacket(jsonString);
-            gameClient.SendPacket(voicePacket);
-            Console.WriteLine($"DEBUG: Voice packet sent successfully to client");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error sending voice packet to client: {ex.Message}");
-        }
-    }
-private async Task SendGamePacketToClient(Client gameClient, string packetData)
-{
-    try
-    {
-        Console.WriteLine($"DEBUG: SendGamePacketToClient called");
-        Console.WriteLine($"DEBUG: packetData = '{packetData}'");
-        Console.WriteLine($"DEBUG: packetData length = {packetData?.Length ?? 0}");
-        
-        if (string.IsNullOrEmpty(packetData))
-        {
-            Console.WriteLine($"WARNING: packetData is null or empty!");
-            return;
+            try
+            {
+                // Get client's IP from existing connection
+                var clientEndpoint = gameClient.Socket?.RemoteEndPoint as IPEndPoint;
+                if (clientEndpoint == null)
+                {
+                    Console.WriteLine($"Could not get IP for client {gameClient.Player?.AccountId}");
+                    return;
+                }
+
+                // Send raw audio data to client's VoiceManager on port 2051
+                var voiceEndpoint = new IPEndPoint(clientEndpoint.Address, 2051);
+
+                using (var udpClient = new UdpClient())
+                {
+                    await udpClient.SendAsync(audioData, audioData.Length, voiceEndpoint);
+                }
+
+                Console.WriteLine($"Sent {audioData.Length} bytes to {clientEndpoint.Address}:2051");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error sending audio to client: {ex.Message}");
+            }
         }
 
-        // Create a proximity voice packet using your existing packet system
-        var voicePacket = new ProximityVoicePacket(packetData);
-        Console.WriteLine($"DEBUG: Created ProximityVoicePacket");
-        
-        gameClient.SendPacket(voicePacket);
-        Console.WriteLine($"DEBUG: Packet sent successfully to client");
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"Error sending voice packet to client: {ex.Message}");
-        Console.WriteLine($"Stack trace: {ex.StackTrace}");
-    }
-}
-        
         private float CalculateDistance(float x1, float y1, float x2, float y2)
         {
             float dx = x1 - x2;
