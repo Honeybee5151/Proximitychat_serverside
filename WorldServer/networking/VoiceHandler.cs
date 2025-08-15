@@ -25,6 +25,16 @@ namespace WorldServer.networking
         public float Y { get; set; }  // Player Y position
     }
 
+    // New class for outgoing audio messages
+    public class AudioMessage
+    {
+        public string Type { get; set; } = "VOICE_AUDIO";
+        public string AudioData { get; set; } // Base64 encoded
+        public float Volume { get; set; }
+        public DateTime Timestamp { get; set; }
+        public string SpeakerId { get; set; }
+    }
+
     public class VoiceHandler
     {
         private readonly GameServer gameServer;
@@ -36,6 +46,7 @@ namespace WorldServer.networking
         {
             gameServer = server;
         }
+        
         private bool ArePlayersVoiceIgnored(string speakerId, string listenerId)
         {
             try
@@ -63,258 +74,266 @@ namespace WorldServer.networking
             }
         }
        
-public async Task HandleVoiceClient(TcpClient client)
-
-{
-    Console.WriteLine($"DEBUG_VOICE: HandleVoiceClient called from {client.Client.RemoteEndPoint}");
-    var stream = client.GetStream();
-    string clientPlayerId = null;
-    
-    try
-    {
-        while (client.Connected)
+        public async Task HandleVoiceClient(TcpClient client)
         {
-            // Read 4-byte length header
-            var lengthBuffer = new byte[4];
-            int lengthBytesRead = 0;
+            Console.WriteLine($"DEBUG_VOICE: HandleVoiceClient called from {client.Client.RemoteEndPoint}");
+            var stream = client.GetStream();
+            string clientPlayerId = null;
             
-            while (lengthBytesRead < 4)
+            try
             {
-                int bytesRead = await stream.ReadAsync(lengthBuffer, lengthBytesRead, 4 - lengthBytesRead);
-                if (bytesRead == 0) break;
-                lengthBytesRead += bytesRead;
-            }
-            
-            if (lengthBytesRead < 4) break;
-            
-            // Parse length using consistent byte order (little-endian)
-            int messageLength = lengthBuffer[0] | 
-                              (lengthBuffer[1] << 8) | 
-                              (lengthBuffer[2] << 16) | 
-                              (lengthBuffer[3] << 24);
-            
-            Console.WriteLine($"DEBUG: Received length header: {lengthBuffer[0]},{lengthBuffer[1]},{lengthBuffer[2]},{lengthBuffer[3]} = {messageLength} bytes");
-            
-            if (messageLength > 100000 || messageLength < 0) // 100KB safety limit
-            {
-                Console.WriteLine($"Invalid message length: {messageLength} bytes, disconnecting client");
-                break;
-            }
-            
-            // Read the actual message
-            var messageBuffer = new byte[messageLength];
-            int messageBytesRead = 0;
-            
-            while (messageBytesRead < messageLength)
-            {
-                int bytesRead = await stream.ReadAsync(messageBuffer, messageBytesRead, messageLength - messageBytesRead);
-                if (bytesRead == 0) break;
-                messageBytesRead += bytesRead;
-            }
-            
-            if (messageBytesRead < messageLength) break;
-            
-            string message = Encoding.UTF8.GetString(messageBuffer, 0, messageLength);
-            Console.WriteLine($"DEBUG: Received complete message, {messageLength} bytes");
-            
-            clientPlayerId = await ProcessVoiceMessage(message, client);
-            
-        }
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"Voice client error: {ex.Message}");
-    }
-    finally
-    {
-        if (clientPlayerId != null && voiceConnections.ContainsKey(clientPlayerId))
-        {
-            voiceConnections.TryRemove(clientPlayerId, out _);
-        }
-        client.Close();
-    }
-}
-       private async Task<string> ProcessVoiceMessage(string message, TcpClient sender)
-{
-    Console.WriteLine($"DEBUG_VOICE: ProcessVoiceMessage called with: {message.Substring(0, Math.Min(20, message.Length))}");
-    
-    // DECLARE clientPlayerId at the top of the method
-    string clientPlayerId = null;
-    
-    try
-    {
-        if (message.StartsWith("VOICE_DATA:"))
-        {
-            var jsonData = message.Substring("VOICE_DATA:".Length);
-            var voiceData = JsonSerializer.Deserialize<ChatMessage>(jsonData);
-            
-            // Store this client's connection for future broadcasts
-            voiceConnections[voiceData.PlayerId] = sender;
-            clientPlayerId = voiceData.PlayerId; // SET the variable here
-            
-            // Get speaker's current position from game server
-            var speakerPosition = GetPlayerPosition(voiceData.PlayerId);
-            if (speakerPosition == null)
-            {
-                Console.WriteLine($"Could not find position for player {voiceData.PlayerId}");
-                return voiceData.PlayerId;
-            }
-            
-            // Find all players within proximity range
-            var nearbyPlayers = GetPlayersInRange(speakerPosition.X, speakerPosition.Y, PROXIMITY_RANGE);
-            
-            // Send voice data to nearby players via their game connections
-            await BroadcastVoiceToNearbyPlayers(voiceData, nearbyPlayers, speakerPosition);
-            
-            return voiceData.PlayerId;
-        }
-        else if (message.StartsWith("VOICE_CONNECT:"))
-        {
-            // Handle initial connection - player identifying themselves
-            // Format: VOICE_CONNECT:playerID:voiceID
-            var parts = message.Substring("VOICE_CONNECT:".Length).Split(':');
-            if (parts.Length < 2)
-            {
-                Console.WriteLine("Invalid voice connect format - missing voiceID");
-                sender.Close();
-                return null;
-            }
-
-            var playerId = parts[0];
-            var voiceId = parts[1];
-
-            // Validate VoiceID belongs to this player
-            if (!ValidateVoiceID(playerId, voiceId))
-            {
-                Console.WriteLine($"SECURITY: Invalid VoiceID for player {playerId}");
-                sender.Close();
-                return null;
-            }
-
-            // Check if player is actually in game
-            if (!VerifyPlayerSession(playerId))
-            {
-                Console.WriteLine($"SECURITY: Player {playerId} not in active game session");
-                sender.Close();
-                return null;
-            }
-
-            // Check for duplicate connections
-            if (voiceConnections.ContainsKey(playerId))
-            {
-                Console.WriteLine($"SECURITY: Closing duplicate voice connection for player {playerId}");
-                voiceConnections[playerId].Close(); // Close old connection
-            }
-
-            voiceConnections[playerId] = sender;
-            clientPlayerId = playerId; // SET the variable here
-            Console.WriteLine($"Voice connection established for player {playerId}");
-            return playerId;
-        }
-        else if (message.StartsWith("PRIORITY_SETTING:"))
-        {
-            // Format: PRIORITY_SETTING:settingType:value
-            var parts = message.Substring("PRIORITY_SETTING:".Length).Split(':');
-            if (parts.Length >= 2)
-            {
-                var settingType = parts[0];
-                var value = parts[1];
-                
-                // Find clientPlayerId from the voice connection if not already set
-                if (clientPlayerId == null)
+                while (client.Connected)
                 {
-                    foreach (var conn in voiceConnections)
+                    // Read 4-byte length header
+                    var lengthBuffer = new byte[4];
+                    int lengthBytesRead = 0;
+                    
+                    while (lengthBytesRead < 4)
                     {
-                        if (conn.Value == sender)
+                        int bytesRead = await stream.ReadAsync(lengthBuffer, lengthBytesRead, 4 - lengthBytesRead);
+                        if (bytesRead == 0) break;
+                        lengthBytesRead += bytesRead;
+                    }
+                    
+                    if (lengthBytesRead < 4) break;
+                    
+                    // Parse length using consistent byte order (little-endian)
+                    int messageLength = lengthBuffer[0] | 
+                                      (lengthBuffer[1] << 8) | 
+                                      (lengthBuffer[2] << 16) | 
+                                      (lengthBuffer[3] << 24);
+                    
+                    Console.WriteLine($"DEBUG: Received length header: {lengthBuffer[0]},{lengthBuffer[1]},{lengthBuffer[2]},{lengthBuffer[3]} = {messageLength} bytes");
+                    
+                    if (messageLength > 100000 || messageLength < 0) // 100KB safety limit
+                    {
+                        Console.WriteLine($"Invalid message length: {messageLength} bytes, disconnecting client");
+                        break;
+                    }
+                    
+                    // Read the actual message
+                    var messageBuffer = new byte[messageLength];
+                    int messageBytesRead = 0;
+                    
+                    while (messageBytesRead < messageLength)
+                    {
+                        int bytesRead = await stream.ReadAsync(messageBuffer, messageBytesRead, messageLength - messageBytesRead);
+                        if (bytesRead == 0) break;
+                        messageBytesRead += bytesRead;
+                    }
+                    
+                    if (messageBytesRead < messageLength) break;
+                    
+                    string message = Encoding.UTF8.GetString(messageBuffer, 0, messageLength);
+                    Console.WriteLine($"DEBUG: Received complete message, {messageLength} bytes");
+                    
+                    clientPlayerId = await ProcessVoiceMessage(message, client);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Voice client error: {ex.Message}");
+            }
+            finally
+            {
+                if (clientPlayerId != null && voiceConnections.ContainsKey(clientPlayerId))
+                {
+                    voiceConnections.TryRemove(clientPlayerId, out _);
+                }
+                try
+                {
+                    client.Close();
+                }
+                catch { }
+            }
+        }
+        
+        private async Task<string> ProcessVoiceMessage(string message, TcpClient sender)
+        {
+            Console.WriteLine($"DEBUG_VOICE: ProcessVoiceMessage called with: {message.Substring(0, Math.Min(20, message.Length))}");
+            
+            // DECLARE clientPlayerId at the top of the method
+            string clientPlayerId = null;
+            
+            try
+            {
+                if (message.StartsWith("VOICE_DATA:"))
+                {
+                    var jsonData = message.Substring("VOICE_DATA:".Length);
+                    var voiceData = JsonSerializer.Deserialize<ChatMessage>(jsonData);
+                    
+                    // Store this client's connection for future broadcasts
+                    voiceConnections[voiceData.PlayerId] = sender;
+                    clientPlayerId = voiceData.PlayerId; // SET the variable here
+                    
+                    // Get speaker's current position from game server
+                    var speakerPosition = GetPlayerPosition(voiceData.PlayerId);
+                    if (speakerPosition == null)
+                    {
+                        Console.WriteLine($"Could not find position for player {voiceData.PlayerId}");
+                        return voiceData.PlayerId;
+                    }
+                    
+                    // Find all players within proximity range
+                    var nearbyPlayers = GetPlayersInRange(speakerPosition.X, speakerPosition.Y, PROXIMITY_RANGE);
+                    
+                    // Send voice data to nearby players via their TCP connections
+                    await BroadcastVoiceToNearbyPlayers(voiceData, nearbyPlayers, speakerPosition);
+                    
+                    return voiceData.PlayerId;
+                }
+                else if (message.StartsWith("VOICE_CONNECT:"))
+                {
+                    // Handle initial connection - player identifying themselves
+                    // Format: VOICE_CONNECT:playerID:voiceID
+                    var parts = message.Substring("VOICE_CONNECT:".Length).Split(':');
+                    if (parts.Length < 2)
+                    {
+                        Console.WriteLine("Invalid voice connect format - missing voiceID");
+                        sender.Close();
+                        return null;
+                    }
+
+                    var playerId = parts[0];
+                    var voiceId = parts[1];
+
+                    // Validate VoiceID belongs to this player
+                    if (!ValidateVoiceID(playerId, voiceId))
+                    {
+                        Console.WriteLine($"SECURITY: Invalid VoiceID for player {playerId}");
+                        sender.Close();
+                        return null;
+                    }
+
+                    // Check if player is actually in game
+                    if (!VerifyPlayerSession(playerId))
+                    {
+                        Console.WriteLine($"SECURITY: Player {playerId} not in active game session");
+                        sender.Close();
+                        return null;
+                    }
+
+                    // Check for duplicate connections
+                    if (voiceConnections.ContainsKey(playerId))
+                    {
+                        Console.WriteLine($"SECURITY: Closing duplicate voice connection for player {playerId}");
+                        try
                         {
-                            clientPlayerId = conn.Key;
-                            break;
+                            voiceConnections[playerId].Close(); // Close old connection
+                        }
+                        catch { }
+                    }
+
+                    voiceConnections[playerId] = sender;
+                    clientPlayerId = playerId; // SET the variable here
+                    Console.WriteLine($"Voice connection established for player {playerId}");
+                    return playerId;
+                }
+                else if (message.StartsWith("PRIORITY_SETTING:"))
+                {
+                    // Format: PRIORITY_SETTING:settingType:value
+                    var parts = message.Substring("PRIORITY_SETTING:".Length).Split(':');
+                    if (parts.Length >= 2)
+                    {
+                        var settingType = parts[0];
+                        var value = parts[1];
+                        
+                        // Find clientPlayerId from the voice connection if not already set
+                        if (clientPlayerId == null)
+                        {
+                            foreach (var conn in voiceConnections)
+                            {
+                                if (conn.Value == sender)
+                                {
+                                    clientPlayerId = conn.Key;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (clientPlayerId == null)
+                        {
+                            Console.WriteLine("Cannot process priority setting - client not identified");
+                            return null;
+                        }
+                        
+                        // Get the player's world ID to apply settings to the correct world
+                        var playerPosition = GetPlayerPosition(clientPlayerId);
+                        if (playerPosition != null)
+                        {
+                            var settings = GetPrioritySettings(playerPosition.WorldId);
+                            
+                            switch (settingType)
+                            {
+                                case "ENABLED":
+                                    if (bool.TryParse(value, out bool enabled))
+                                    {
+                                        settings.EnablePriority = enabled;
+                                        Console.WriteLine($"Priority system {(enabled ? "enabled" : "disabled")} for world {playerPosition.WorldId}");
+                                    }
+                                    break;
+                                    
+                                case "THRESHOLD":
+                                    if (int.TryParse(value, out int threshold))
+                                    {
+                                        settings.ActivationThreshold = threshold;
+                                        Console.WriteLine($"Priority threshold set to {threshold} for world {playerPosition.WorldId}");
+                                    }
+                                    break;
+                                    
+                                case "NON_PRIORITY_VOLUME":
+                                    if (float.TryParse(value, out float volume))
+                                    {
+                                        settings.NonPriorityVolume = volume;
+                                        Console.WriteLine($"Non-priority volume set to {volume} for world {playerPosition.WorldId}");
+                                    }
+                                    break;
+                                    
+                                case "ADD_MANUAL":
+                                    if (int.TryParse(value, out int addAccountId))
+                                    {
+                                        if (settings.AddManualPriority(addAccountId))
+                                        {
+                                            Console.WriteLine($"Added manual priority for account {addAccountId} in world {playerPosition.WorldId}");
+                                        }
+                                        else
+                                        {
+                                            Console.WriteLine($"Failed to add manual priority - list full ({settings.GetManualPriorityCount()}/{settings.MaxPriorityPlayers})");
+                                        }
+                                    }
+                                    break;
+                                    
+                                case "REMOVE_MANUAL":
+                                    if (int.TryParse(value, out int removeAccountId))
+                                    {
+                                        if (settings.RemoveManualPriority(removeAccountId))
+                                        {
+                                            Console.WriteLine($"Removed manual priority for account {removeAccountId} in world {playerPosition.WorldId}");
+                                        }
+                                        else
+                                        {
+                                            Console.WriteLine($"Account {removeAccountId} was not in manual priority list");
+                                        }
+                                    }
+                                    break;
+                            }
+                            
+                            // Validate settings after any changes
+                            settings.ValidateSettings();
                         }
                     }
-                }
-                
-                if (clientPlayerId == null)
-                {
-                    Console.WriteLine("Cannot process priority setting - client not identified");
-                    return null;
-                }
-                
-                // Get the player's world ID to apply settings to the correct world
-                var playerPosition = GetPlayerPosition(clientPlayerId);
-                if (playerPosition != null)
-                {
-                    var settings = GetPrioritySettings(playerPosition.WorldId);
                     
-                    switch (settingType)
-                    {
-                        case "ENABLED":
-                            if (bool.TryParse(value, out bool enabled))
-                            {
-                                settings.EnablePriority = enabled;
-                                Console.WriteLine($"Priority system {(enabled ? "enabled" : "disabled")} for world {playerPosition.WorldId}");
-                            }
-                            break;
-                            
-                        case "THRESHOLD":
-                            if (int.TryParse(value, out int threshold))
-                            {
-                                settings.ActivationThreshold = threshold;
-                                Console.WriteLine($"Priority threshold set to {threshold} for world {playerPosition.WorldId}");
-                            }
-                            break;
-                            
-                        case "NON_PRIORITY_VOLUME":
-                            if (float.TryParse(value, out float volume))
-                            {
-                                settings.NonPriorityVolume = volume;
-                                Console.WriteLine($"Non-priority volume set to {volume} for world {playerPosition.WorldId}");
-                            }
-                            break;
-                            
-                        case "ADD_MANUAL":
-                            if (int.TryParse(value, out int addAccountId))
-                            {
-                                if (settings.AddManualPriority(addAccountId))
-                                {
-                                    Console.WriteLine($"Added manual priority for account {addAccountId} in world {playerPosition.WorldId}");
-                                }
-                                else
-                                {
-                                    Console.WriteLine($"Failed to add manual priority - list full ({settings.GetManualPriorityCount()}/{settings.MaxPriorityPlayers})");
-                                }
-                            }
-                            break;
-                            
-                        case "REMOVE_MANUAL":
-                            if (int.TryParse(value, out int removeAccountId))
-                            {
-                                if (settings.RemoveManualPriority(removeAccountId))
-                                {
-                                    Console.WriteLine($"Removed manual priority for account {removeAccountId} in world {playerPosition.WorldId}");
-                                }
-                                else
-                                {
-                                    Console.WriteLine($"Account {removeAccountId} was not in manual priority list");
-                                }
-                            }
-                            break;
-                    }
-                    
-                    // Validate settings after any changes
-                    settings.ValidateSettings();
+                    return clientPlayerId;
                 }
             }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error processing voice message: {ex.Message}");
+            }
             
-            return clientPlayerId;
+            return clientPlayerId; // Return whatever clientPlayerId was set to, or null
         }
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"Error processing voice message: {ex.Message}");
-    }
-    
-    return clientPlayerId; // Return whatever clientPlayerId was set to, or null
-}       
+        
         private PlayerPosition GetPlayerPosition(string playerId)
         {
             try
@@ -349,6 +368,7 @@ public async Task HandleVoiceClient(TcpClient client)
                 return null;
             }
         }
+        
         private bool ValidateVoiceID(string playerId, string voiceId)
         {
             try
@@ -363,6 +383,7 @@ public async Task HandleVoiceClient(TcpClient client)
                 return false;
             }
         }
+        
         private bool VerifyPlayerSession(string playerId)
         {
             try
@@ -375,7 +396,6 @@ public async Task HandleVoiceClient(TcpClient client)
                     if (client.Player?.AccountId.ToString() == playerId && 
                         client.Socket?.Connected == true && 
                         client.Player.World != null)
-
                     {
                         return true;
                     }
@@ -388,11 +408,12 @@ public async Task HandleVoiceClient(TcpClient client)
                 return false;
             }
         }
-        private VoicePlayerInfo [] GetPlayersInRange(float speakerX, float speakerY, float range)
+        
+        private VoicePlayerInfo[] GetPlayersInRange(float speakerX, float speakerY, float range)
         {
             try
             {
-                var nearbyPlayers = new List<VoicePlayerInfo >();
+                var nearbyPlayers = new List<VoicePlayerInfo>();
                 var clients = gameServer.ConnectionManager.Clients;
                 
                 foreach (var clientPair in clients)
@@ -423,58 +444,117 @@ public async Task HandleVoiceClient(TcpClient client)
             }
         }
         
-      
-       private async Task BroadcastVoiceToNearbyPlayers(ChatMessage voiceData, VoicePlayerInfo[] nearbyPlayers, PlayerPosition speakerPosition)
-{
-    try
-    {
-        // Get priority settings for this world
-        var prioritySettings = GetPrioritySettings(speakerPosition.WorldId);
-        bool prioritySystemActive = ShouldActivatePrioritySystem(speakerPosition.WorldId, nearbyPlayers.Length);
-
-        Console.WriteLine($"Priority system active: {prioritySystemActive} ({nearbyPlayers.Length} players nearby)");
-
-        foreach (var nearbyPlayer in nearbyPlayers)
+        private async Task BroadcastVoiceToNearbyPlayers(ChatMessage voiceData, VoicePlayerInfo[] nearbyPlayers, PlayerPosition speakerPosition)
         {
             try
             {
-                // Check if players have each other ignored
-                if (ArePlayersVoiceIgnored(voiceData.PlayerId, nearbyPlayer.PlayerId))
+                // Get priority settings for this world
+                var prioritySettings = GetPrioritySettings(speakerPosition.WorldId);
+                bool prioritySystemActive = ShouldActivatePrioritySystem(speakerPosition.WorldId, nearbyPlayers.Length);
+
+                Console.WriteLine($"Priority system active: {prioritySystemActive} ({nearbyPlayers.Length} players nearby)");
+
+                foreach (var nearbyPlayer in nearbyPlayers)
                 {
-                    Console.WriteLine($"Voice blocked: {voiceData.PlayerId} <-> {nearbyPlayer.PlayerId} (ignored)");
-                    continue;
+                    try
+                    {
+                        // Uncomment these lines if you want to skip self-voice
+                         if (voiceData.PlayerId == nearbyPlayer.PlayerId)
+                         {
+                             Console.WriteLine($"Skipping self-voice for player {voiceData.PlayerId}");
+                             continue;
+                         }
+
+                        // Check if players have each other ignored
+                        if (ArePlayersVoiceIgnored(voiceData.PlayerId, nearbyPlayer.PlayerId))
+                        {
+                            Console.WriteLine($"Voice blocked: {voiceData.PlayerId} <-> {nearbyPlayer.PlayerId} (ignored)");
+                            continue;
+                        }
+
+                        // Calculate base volume based on distance - increased minimum volume for testing
+                        float distanceVolume = Math.Max(0.3f, 1.0f - (nearbyPlayer.Distance / PROXIMITY_RANGE));
+                        float finalVolume = Math.Max(0.5f, voiceData.Volume * distanceVolume); // Force minimum volume
+
+                        // Apply priority system if active
+                        if (prioritySystemActive)
+                        {
+                            bool hasPriority = HasVoicePriority(voiceData.PlayerId, nearbyPlayer.PlayerId, prioritySettings);
+                            float volumeMultiplier = prioritySettings.GetVolumeMultiplier(hasPriority);
+                            finalVolume *= volumeMultiplier;
+
+                            Console.WriteLine($"Player {voiceData.PlayerId} -> {nearbyPlayer.PlayerId}: Priority={hasPriority}, Volume={finalVolume:F2}");
+                        }
+
+                        // Send audio with calculated volume via TCP
+                        await SendAudioToClientTCP(nearbyPlayer.PlayerId, voiceData.AudioData, finalVolume, voiceData.PlayerId);
+
+                        Console.WriteLine($"Sent voice from {voiceData.PlayerId} to {nearbyPlayer.PlayerId} (distance: {nearbyPlayer.Distance:F1}, volume: {finalVolume:F2})");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error sending voice to player {nearbyPlayer.PlayerId}: {ex.Message}");
+                    }
                 }
-
-                // Calculate base volume based on distance
-                float distanceVolume = Math.Max(0.1f, 1.0f - (nearbyPlayer.Distance / PROXIMITY_RANGE));
-                float finalVolume = voiceData.Volume * distanceVolume;
-
-                // Apply priority system if active
-                if (prioritySystemActive)
-                {
-                    bool hasPriority = HasVoicePriority(voiceData.PlayerId, nearbyPlayer.PlayerId, prioritySettings);
-                    float volumeMultiplier = prioritySettings.GetVolumeMultiplier(hasPriority);
-                    finalVolume *= volumeMultiplier;
-
-                    Console.WriteLine($"Player {voiceData.PlayerId} -> {nearbyPlayer.PlayerId}: Priority={hasPriority}, Volume={finalVolume:F2}");
-                }
-
-                // Send audio with calculated volume
-                await SendAudioToClient(nearbyPlayer.Client, voiceData.AudioData, finalVolume);
-
-                Console.WriteLine($"Sent voice from {voiceData.PlayerId} to {nearbyPlayer.PlayerId} (distance: {nearbyPlayer.Distance:F1}, volume: {finalVolume:F2})");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error sending voice to player {nearbyPlayer.PlayerId}: {ex.Message}");
+                Console.WriteLine($"Error broadcasting voice: {ex.Message}");
             }
         }
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"Error broadcasting voice: {ex.Message}");
-    }
-}
+
+        // NEW METHOD: Send audio via TCP instead of UDP
+        private async Task SendAudioToClientTCP(string targetPlayerId, byte[] audioData, float volume, string speakerId)
+        {
+            try
+            {
+                // Check if we have a voice connection for this player
+                if (!voiceConnections.ContainsKey(targetPlayerId))
+                {
+                    Console.WriteLine($"No voice connection found for player {targetPlayerId}");
+                    return;
+                }
+
+                var voiceClient = voiceConnections[targetPlayerId];
+                if (!voiceClient.Connected)
+                {
+                    Console.WriteLine($"Voice connection not active for player {targetPlayerId}");
+                    voiceConnections.TryRemove(targetPlayerId, out _);
+                    return;
+                }
+
+                // Create audio message
+                var audioMessage = new AudioMessage
+                {
+                    Type = "VOICE_AUDIO",
+                    AudioData = Convert.ToBase64String(audioData),
+                    Volume = volume,
+                    Timestamp = DateTime.UtcNow,
+                    SpeakerId = speakerId
+                };
+
+                string jsonMessage = JsonSerializer.Serialize(audioMessage);
+                byte[] messageBytes = Encoding.UTF8.GetBytes(jsonMessage);
+                
+                // Send length header (4 bytes, little-endian)
+                byte[] lengthHeader = BitConverter.GetBytes(messageBytes.Length);
+                
+                var stream = voiceClient.GetStream();
+                await stream.WriteAsync(lengthHeader, 0, 4);
+                await stream.WriteAsync(messageBytes, 0, messageBytes.Length);
+                await stream.FlushAsync();
+
+                Console.WriteLine($"Sent {audioData.Length} bytes via TCP to player {targetPlayerId} (volume: {volume:F2})");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error sending audio via TCP to player {targetPlayerId}: {ex.Message}");
+                // Clean up broken connection
+                voiceConnections.TryRemove(targetPlayerId, out _);
+            }
+        }
+
+        // LEGACY METHOD: Keep for reference but not used anymore
         private async Task SendAudioToClient(Client gameClient, byte[] audioData, float volume)
         {
             try
@@ -502,6 +582,7 @@ public async Task HandleVoiceClient(TcpClient client)
                 Console.WriteLine($"Error sending audio to client: {ex.Message}");
             }
         }
+        
         private VoicePrioritySettings GetPrioritySettings(int worldId)
         {
             return worldPrioritySettings.GetOrAdd(worldId, _ => new VoicePrioritySettings());
@@ -555,6 +636,7 @@ public async Task HandleVoiceClient(TcpClient client)
                 return false;
             }
         }
+        
         private float CalculateDistance(float x1, float y1, float x2, float y2)
         {
             float dx = x1 - x2;
@@ -577,4 +659,4 @@ public async Task HandleVoiceClient(TcpClient client)
         public Client Client { get; set; } // Your Client type
         public float Distance { get; set; }
     }
-} 
+}
