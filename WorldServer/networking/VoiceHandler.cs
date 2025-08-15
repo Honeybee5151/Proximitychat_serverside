@@ -127,6 +127,7 @@ namespace WorldServer.networking
                     string message = Encoding.UTF8.GetString(messageBuffer, 0, messageLength);
                     Console.WriteLine($"DEBUG: Received complete message, {messageLength} bytes");
                     
+                    
                     clientPlayerId = await ProcessVoiceMessage(message, client);
                 }
             }
