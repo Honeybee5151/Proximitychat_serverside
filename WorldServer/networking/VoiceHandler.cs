@@ -40,7 +40,7 @@ namespace WorldServer.networking
         private readonly GameServer gameServer;
         private readonly ConcurrentDictionary<string, TcpClient> voiceConnections = new();
         private const float PROXIMITY_RANGE = 15.0f; // Tiles - adjust as needed
-        private readonly ConcurrentDictionary<int, VoicePrioritySettings> worldPrioritySettings = new();
+       
         
         private readonly ConcurrentDictionary<string, bool> playerVoiceEnabled = new();
         public VoiceHandler(GameServer server)
@@ -207,7 +207,7 @@ namespace WorldServer.networking
                 return null;
             }
 
-            // Check if player is actually in game
+            // Check if player is actually in gamed
             if (!VerifyPlayerSession(playerId))
             {
                 Console.WriteLine($"SECURITY: Player {playerId} not in active game session");
@@ -375,10 +375,9 @@ namespace WorldServer.networking
             try
             {
                 // Get priority settings for this world
-                var prioritySettings = GetPrioritySettings(speakerPosition.WorldId);
-                bool prioritySystemActive = ShouldActivatePrioritySystem(speakerPosition.WorldId, nearbyPlayers.Length);
+                
 
-                Console.WriteLine($"Priority system active: {prioritySystemActive} ({nearbyPlayers.Length} players nearby)");
+                
 
                 foreach (var nearbyPlayer in nearbyPlayers)
                 {
@@ -407,14 +406,7 @@ namespace WorldServer.networking
                         float finalVolume = Math.Max(0.5f, voiceData.Volume * distanceVolume); // Force minimum volume
 
                         // Apply priority system if active
-                        if (prioritySystemActive)
-                        {
-                            bool hasPriority = HasVoicePriority(voiceData.PlayerId, nearbyPlayer.PlayerId, prioritySettings);
-                            float volumeMultiplier = prioritySettings.GetVolumeMultiplier(hasPriority);
-                            finalVolume *= volumeMultiplier;
-
-                            Console.WriteLine($"Player {voiceData.PlayerId} -> {nearbyPlayer.PlayerId}: Priority={hasPriority}, Volume={finalVolume:F2}");
-                        }
+                        
 
                         // Send audio with calculated volume via TCP
                         await SendAudioToClientTCP(nearbyPlayer.PlayerId, voiceData.AudioData, finalVolume, voiceData.PlayerId);
@@ -512,60 +504,10 @@ namespace WorldServer.networking
                 Console.WriteLine($"Error sending audio to client: {ex.Message}");
             }
         }
-        
-        private VoicePrioritySettings GetPrioritySettings(int worldId)
-        {
-            return worldPrioritySettings.GetOrAdd(worldId, _ => new VoicePrioritySettings());
-        }
 
-        private bool ShouldActivatePrioritySystem(int worldId, int nearbyPlayerCount)
-        {
-            var settings = GetPrioritySettings(worldId);
-            if (!settings.EnablePriority) return false;
     
-            // Default activation threshold of 8 players (you can make this configurable later)
-            int activationThreshold = 8;
-            return nearbyPlayerCount >= activationThreshold;
-        }
 
-        private bool HasVoicePriority(string playerId, string listenerId, VoicePrioritySettings settings)
-        {
-            try
-            {
-                int playerAccountId = int.Parse(playerId);
-                int listenerAccountId = int.Parse(listenerId);
-        
-                // Check manual priority list
-                if (settings.HasManualPriority(playerAccountId))
-                    return true;
-
-                var playerAccount = gameServer.Database.GetAccount(playerAccountId);
-                var listenerAccount = gameServer.Database.GetAccount(listenerAccountId);
-
-                if (playerAccount == null || listenerAccount == null)
-                    return false;
-
-                // Check guild priority
-                if (settings.GuildMembersGetPriority && playerAccount.GuildId > 0)
-                {
-                    if (playerAccount.GuildId == listenerAccount.GuildId)
-                        return true;
-                }
-
-                // Check locked player priority - if listener has speaker locked, give speaker priority
-                if (settings.LockedPlayersGetPriority && listenerAccount.LockList.Contains(playerAccountId))
-                {
-                    return true;
-                }
-
-                return false;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error checking voice priority: {ex.Message}");
-                return false;
-            }
-        }
+       
         
         private float CalculateDistance(float x1, float y1, float x2, float y2)
         {
