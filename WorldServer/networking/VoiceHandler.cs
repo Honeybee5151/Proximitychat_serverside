@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Shared.database.account;
+using Shared.resources;
 using WorldServer.core;
 using WorldServer.networking.packets.outgoing;
 
@@ -476,13 +477,23 @@ private void AssignPlayerToVoiceGroup(string playerId, int worldId)
                 await SendAudioToClientTCP(memberId, voiceData.AudioData, voiceData.Volume, voiceData.PlayerId);
             }
         }
+        
         private bool IsDungeon(int worldId)
         {
-            // You'll need to implement this based on your world system
-            // Return true if worldId represents a dungeon
-            return worldId > 0; // Placeholder - adjust based on your world ID scheme
-        }
+            try
+            {
+                var world = gameServer.WorldManager.GetWorld(worldId);
+                if (world == null) return false;
 
+                // Check if the world instance type is Dungeon
+                return world.InstanceType == WorldResourceInstanceType.Dungeon;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error checking if world {worldId} is dungeon: {ex.Message}");
+                return false;
+            }
+        }
         private VoiceGroup FindGroupById(string groupId, int worldId)
         {
             if (!dungeonVoiceGroups.ContainsKey(worldId)) return null;
