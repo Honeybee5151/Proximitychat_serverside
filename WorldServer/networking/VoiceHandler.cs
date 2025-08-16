@@ -571,25 +571,7 @@ private VoiceGroup FindGroupByPlayerId(string playerId)
     return null;
 }
 
-private void CheckForEmptyGroup(int worldId)
-{
-    if (!dungeonVoiceGroups.ContainsKey(worldId)) return;
-    
-    var groups = dungeonVoiceGroups[worldId];
-    var emptyGroups = groups.Where(g => g.PlayerIds.Count == 0).ToList();
-    
-    foreach (var emptyGroup in emptyGroups)
-    {
-        groups.Remove(emptyGroup);
-        Console.WriteLine($"Removed empty voice group {emptyGroup.GroupId} from world {worldId}");
-    }
-    
-    if (groups.Count == 0)
-    {
-        dungeonVoiceGroups.TryRemove(worldId, out _);
-        Console.WriteLine($"Removed all voice groups for world {worldId}");
-    }
-}
+
 
 public async Task<bool> AssignPlayerToVoiceGroup(string playerId, int worldId)
 {
@@ -678,40 +660,7 @@ public async Task<bool> AssignPlayerToVoiceGroup(string playerId, int worldId)
             }
         }
         
-        private VoicePlayerInfo[] GetPlayersInRange(float speakerX, float speakerY, float range)
-        {
-            try
-            {
-                var nearbyPlayers = new List<VoicePlayerInfo>();
-                var clients = gameServer.ConnectionManager.Clients;
-                
-                foreach (var clientPair in clients)
-                {
-                    var client = clientPair.Key;
-                    if (client.Player != null && client.Player.World != null)
-                    {
-                        float distance = CalculateDistance(speakerX, speakerY, client.Player.X, client.Player.Y);
-                        
-                        if (distance <= range)
-                        {
-                            nearbyPlayers.Add(new VoicePlayerInfo
-                            {
-                                PlayerId = client.Player.AccountId.ToString(),
-                                Client = client,
-                                Distance = distance
-                            });
-                        }
-                    }
-                }
-                
-                return nearbyPlayers.ToArray();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error finding nearby players: {ex.Message}");
-                return new VoicePlayerInfo[0];
-            }
-        }
+        
         
         private async Task BroadcastVoiceToGroup(ChatMessage voiceData, PlayerPosition speakerPosition)
         {
@@ -720,20 +669,49 @@ public async Task<bool> AssignPlayerToVoiceGroup(string playerId, int worldId)
                 Console.WriteLine($"Player {voiceData.PlayerId} not in any voice group");
                 return;
             }
-    
+
             var groupId = playerToGroupMapping[voiceData.PlayerId];
             var group = FindGroupById(groupId, speakerPosition.WorldId);
-    
+
             if (group == null) return;
-    
+
             foreach (var memberId in group.PlayerIds)
             {
                 if (memberId == voiceData.PlayerId) continue; // Skip self
                 if (!playerVoiceEnabled.GetValueOrDefault(memberId, true)) continue;
                 if (ArePlayersVoiceIgnored(voiceData.PlayerId, memberId)) continue;
-        
-                await SendAudioToClientTCP(memberId, voiceData.AudioData, voiceData.Volume, voiceData.PlayerId);
+
+                // NEW: Check distance within the group
+                var listenerPosition = GetPlayerPosition(memberId);
+                if (listenerPosition == null) continue;
+
+                float distance = CalculateDistance(
+                    speakerPosition.X, speakerPosition.Y,
+                    listenerPosition.X, listenerPosition.Y
+                );
+
+                // Only send audio if within range
+                if (distance <= PROXIMITY_RANGE)
+                {
+                    // Optional: Apply distance-based volume attenuation
+                    float adjustedVolume = CalculateVolumeByDistance(voiceData.Volume, distance);
+            
+                    await SendAudioToClientTCP(memberId, voiceData.AudioData, adjustedVolume, voiceData.PlayerId);
+                    Console.WriteLine($"Sent audio to {memberId} at distance {distance:F1} tiles (volume: {adjustedVolume:F2})");
+                }
+                else
+                {
+                    Console.WriteLine($"Player {memberId} out of range ({distance:F1} > {PROXIMITY_RANGE} tiles)");
+                }
             }
+        }
+        private float CalculateVolumeByDistance(float originalVolume, float distance)
+        {
+            if (distance <= 1.0f) return originalVolume; // Full volume up close
+    
+            // Linear falloff: volume decreases as distance increases
+            float attenuation = Math.Max(0.1f, 1.0f - (distance / PROXIMITY_RANGE));
+            return originalVolume * attenuation;
         }
         
         private bool IsDungeon(int worldId)
