@@ -7,6 +7,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Shared.database.account;
 using Shared.resources;
@@ -56,10 +57,72 @@ namespace WorldServer.networking
         private readonly ConcurrentDictionary<string, string> playerToGroupMapping = new();
 
         private readonly ConcurrentDictionary<string, bool> playerVoiceEnabled = new();
+        
+        private readonly ConcurrentQueue<GroupOperation> groupOperationQueue = new();
+        private readonly object groupLock = new object();
+        private readonly Timer cleanupTimer;
+        private readonly Timer heartbeatTimer;
 
         public VoiceHandler(GameServer server)
         {
             gameServer = server;
+            cleanupTimer = new Timer(PerformPeriodicCleanup, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        
+            // Heartbeat timer runs every 10 seconds
+            heartbeatTimer = new Timer(CheckConnectionHeartbeats, null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
+        
+            // Start processing group operations
+            Task.Run(ProcessGroupOperations);
+        }
+        public enum GroupOperationType
+        {
+            JoinGroup,
+            LeaveGroup,
+            CleanupWorld
+        }
+
+        public class GroupOperation
+        {
+            public GroupOperationType Type { get; set; }
+            public string PlayerId { get; set; }
+            public int WorldId { get; set; }
+            public TaskCompletionSource<bool> CompletionSource { get; set; } = new();
+        }
+        private async Task ProcessGroupOperations()
+        {
+            while (true)
+            {
+                try
+                {
+                    if (groupOperationQueue.TryDequeue(out var operation))
+                    {
+                        lock (groupLock)
+                        {
+                            switch (operation.Type)
+                            {
+                                case GroupOperationType.JoinGroup:
+                                    AssignPlayerToVoiceGroupInternal(operation.PlayerId, operation.WorldId);
+                                    break;
+                                case GroupOperationType.LeaveGroup:
+                                    RemovePlayerFromGroupInternal(operation.PlayerId);
+                                    break;
+                                case GroupOperationType.CleanupWorld:
+                                    CleanupVoiceGroupsForWorldInternal(operation.WorldId);
+                                    break;
+                            }
+                        }
+                        operation.CompletionSource.SetResult(true);
+                    }
+                    else
+                    {
+                        await Task.Delay(10); // Small delay when queue is empty
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error processing group operation: {ex.Message}");
+                }
+            }
         }
 
         private bool ArePlayersVoiceIgnored(string speakerId, string listenerId)
@@ -89,29 +152,212 @@ namespace WorldServer.networking
             }
         }
 
-        private void RemovePlayerFromGroup(string playerId)
+        public async Task<bool> RemovePlayerFromGroup(string playerId)
         {
-            if (!playerToGroupMapping.ContainsKey(playerId)) return;
-
-            var groupId = playerToGroupMapping[playerId];
-            playerToGroupMapping.TryRemove(playerId, out _);
-
-            // Find and update the group
-            foreach (var worldGroups in dungeonVoiceGroups.Values)
+            var operation = new GroupOperation
             {
-                var group = worldGroups.FirstOrDefault(g => g.GroupId == groupId);
-                if (group != null)
-                {
-                    group.PlayerIds.Remove(playerId);
-                    if (group.PlayerIds.Count == 0)
-                    {
-                        worldGroups.Remove(group);
-                    }
+                Type = GroupOperationType.LeaveGroup,
+                PlayerId = playerId
+            };
+        
+            groupOperationQueue.Enqueue(operation);
+            return await operation.CompletionSource.Task;
+        }
+  private void AssignPlayerToVoiceGroupInternal(string playerId, int worldId)
+    {
+        if (!playerVoiceEnabled.GetValueOrDefault(playerId, true))
+        {
+            Console.WriteLine($"Player {playerId} has voice disabled - not adding to group");
+            return;
+        }
 
-                    break;
+        // Remove from any existing group first
+        RemovePlayerFromGroupInternal(playerId);
+
+        if (!dungeonVoiceGroups.ContainsKey(worldId))
+        {
+            dungeonVoiceGroups[worldId] = new List<VoiceGroup>();
+        }
+
+        var groups = dungeonVoiceGroups[worldId];
+        var availableGroup = groups.FirstOrDefault(g => g.PlayerIds.Count < g.MaxSize);
+
+        if (availableGroup == null)
+        {
+            availableGroup = new VoiceGroup
+            {
+                WorldId = worldId,
+                MaxSize = 4
+            };
+            groups.Add(availableGroup);
+        }
+
+        availableGroup.PlayerIds.Add(playerId);
+        playerToGroupMapping[playerId] = availableGroup.GroupId;
+
+        Console.WriteLine($"Player {playerId} assigned to group {availableGroup.GroupId} in world {worldId} (size: {availableGroup.PlayerIds.Count})");
+    }
+
+    private void RemovePlayerFromGroupInternal(string playerId)
+    {
+        if (!playerToGroupMapping.ContainsKey(playerId)) return;
+
+        var groupId = playerToGroupMapping[playerId];
+        playerToGroupMapping.TryRemove(playerId, out _);
+
+        // Find and update the group
+        foreach (var worldGroups in dungeonVoiceGroups.Values)
+        {
+            var group = worldGroups.FirstOrDefault(g => g.GroupId == groupId);
+            if (group != null)
+            {
+                group.PlayerIds.Remove(playerId);
+                if (group.PlayerIds.Count == 0)
+                {
+                    worldGroups.Remove(group);
+                    Console.WriteLine($"Removed empty group {group.GroupId} from world {group.WorldId}");
                 }
+                break;
             }
         }
+
+        // Clean up empty world entries
+        var emptyWorlds = dungeonVoiceGroups.Where(kv => kv.Value.Count == 0).ToList();
+        foreach (var emptyWorld in emptyWorlds)
+        {
+            dungeonVoiceGroups.TryRemove(emptyWorld.Key, out _);
+            Console.WriteLine($"Removed empty world {emptyWorld.Key} from voice groups");
+        }
+    }
+
+    // NEW: Periodic cleanup to handle orphaned data
+    private void PerformPeriodicCleanup(object state)
+    {
+        try
+        {
+            Console.WriteLine("Starting periodic voice system cleanup...");
+            
+            // Clean up dead connections
+            var deadConnections = new List<string>();
+            foreach (var connection in voiceConnections)
+            {
+                try
+                {
+                    if (!connection.Value.Connected || !VerifyPlayerSession(connection.Key))
+                    {
+                        deadConnections.Add(connection.Key);
+                    }
+                }
+                catch
+                {
+                    deadConnections.Add(connection.Key);
+                }
+            }
+
+            foreach (var deadPlayerId in deadConnections)
+            {
+                Console.WriteLine($"Cleaning up dead connection for player {deadPlayerId}");
+                voiceConnections.TryRemove(deadPlayerId, out var deadClient);
+                try
+                {
+                    deadClient?.Close();
+                }
+                catch { }
+                
+                // Remove from group as well
+                _ = Task.Run(() => RemovePlayerFromGroup(deadPlayerId));
+            }
+
+            // Clean up groups with no active players
+            lock (groupLock)
+            {
+                var worldsToClean = new List<int>();
+                foreach (var worldEntry in dungeonVoiceGroups)
+                {
+                    var groupsToRemove = new List<VoiceGroup>();
+                    
+                    foreach (var group in worldEntry.Value)
+                    {
+                        var activePlayersInGroup = group.PlayerIds.Where(VerifyPlayerSession).ToList();
+                        
+                        if (activePlayersInGroup.Count != group.PlayerIds.Count)
+                        {
+                            // Remove inactive players from group
+                            var inactivePlayers = group.PlayerIds.Except(activePlayersInGroup).ToList();
+                            foreach (var inactivePlayer in inactivePlayers)
+                            {
+                                group.PlayerIds.Remove(inactivePlayer);
+                                playerToGroupMapping.TryRemove(inactivePlayer, out _);
+                                Console.WriteLine($"Removed inactive player {inactivePlayer} from group {group.GroupId}");
+                            }
+                        }
+
+                        if (group.PlayerIds.Count == 0)
+                        {
+                            groupsToRemove.Add(group);
+                        }
+                    }
+
+                    foreach (var emptyGroup in groupsToRemove)
+                    {
+                        worldEntry.Value.Remove(emptyGroup);
+                        Console.WriteLine($"Removed empty group {emptyGroup.GroupId} from world {worldEntry.Key}");
+                    }
+
+                    if (worldEntry.Value.Count == 0)
+                    {
+                        worldsToClean.Add(worldEntry.Key);
+                    }
+                }
+
+                foreach (var worldId in worldsToClean)
+                {
+                    dungeonVoiceGroups.TryRemove(worldId, out _);
+                    Console.WriteLine($"Removed empty world {worldId} from voice groups");
+                }
+            }
+
+            Console.WriteLine($"Cleanup complete. Active connections: {voiceConnections.Count}, Active groups: {dungeonVoiceGroups.Sum(w => w.Value.Count)}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error during periodic cleanup: {ex.Message}");
+        }
+    }
+    private void CheckConnectionHeartbeats(object state)
+    {
+        var connectionsToCheck = voiceConnections.ToList();
+        
+        foreach (var connection in connectionsToCheck)
+        {
+            try
+            {
+                if (!connection.Value.Connected)
+                {
+                    Console.WriteLine($"Connection heartbeat failed for player {connection.Key}");
+                    voiceConnections.TryRemove(connection.Key, out _);
+                    _ = Task.Run(() => RemovePlayerFromGroup(connection.Key));
+                }
+                else
+                {
+                    // Send a small heartbeat message
+                    var heartbeat = Encoding.UTF8.GetBytes("HEARTBEAT");
+                    var lengthHeader = BitConverter.GetBytes(heartbeat.Length);
+                    
+                    var stream = connection.Value.GetStream();
+                    stream.WriteAsync(lengthHeader, 0, 4);
+                    stream.WriteAsync(heartbeat, 0, heartbeat.Length);
+                    stream.FlushAsync();
+                }
+            }
+            catch
+            {
+                // Connection is dead
+                voiceConnections.TryRemove(connection.Key, out _);
+                _ = Task.Run(() => RemovePlayerFromGroup(connection.Key));
+            }
+        }
+    }
 
         public async Task HandleVoiceClient(TcpClient client)
         {
@@ -200,151 +446,163 @@ namespace WorldServer.networking
         }
 
 
-        private async Task<string> ProcessVoiceMessage(string message, TcpClient sender)
+      private async Task<string> ProcessVoiceMessage(string message, TcpClient sender)
+    {
+        string clientPlayerId = null;
+
+        try
         {
-            Console.WriteLine(
-                $"DEBUG_VOICE: ProcessVoiceMessage called with: {message.Substring(0, Math.Min(20, message.Length))}");
-
-            // DECLARE clientPlayerId at the top of the method
-            string clientPlayerId = null;
-
-            try
+            if (message.StartsWith("VOICE_DATA:"))
             {
-                if (message.StartsWith("VOICE_DATA:"))
+                var jsonData = message.Substring("VOICE_DATA:".Length);
+                var voiceData = JsonSerializer.Deserialize<ChatMessage>(jsonData);
+
+                voiceConnections[voiceData.PlayerId] = sender;
+                clientPlayerId = voiceData.PlayerId;
+
+                var speakerPosition = GetPlayerPosition(voiceData.PlayerId);
+                if (speakerPosition == null)
                 {
-                    var jsonData = message.Substring("VOICE_DATA:".Length);
-                    var voiceData = JsonSerializer.Deserialize<ChatMessage>(jsonData);
-
-                    // Store this client's connection for future broadcasts
-                    voiceConnections[voiceData.PlayerId] = sender;
-                    clientPlayerId = voiceData.PlayerId;
-
-                    // Get speaker's current position from game server
-                    var speakerPosition = GetPlayerPosition(voiceData.PlayerId);
-                    if (speakerPosition == null)
-                    {
-                        Console.WriteLine($"Could not find position for player {voiceData.PlayerId}");
-                        return voiceData.PlayerId;
-                    }
-
-                    // NEW: Use group-based broadcasting instead of proximity
-                    await BroadcastVoiceToGroup(voiceData, speakerPosition);
-
+                    Console.WriteLine($"Could not find position for player {voiceData.PlayerId}");
                     return voiceData.PlayerId;
                 }
-                else if (message.StartsWith("VOICE_CONNECT:"))
+
+                await BroadcastVoiceToGroup(voiceData, speakerPosition);
+                return voiceData.PlayerId;
+            }
+            else if (message.StartsWith("VOICE_CONNECT:"))
+            {
+                var parts = message.Substring("VOICE_CONNECT:".Length).Split(':');
+                if (parts.Length < 2)
                 {
-                    var parts = message.Substring("VOICE_CONNECT:".Length).Split(':');
-                    if (parts.Length < 2)
+                    Console.WriteLine("Invalid voice connect format");
+                    sender.Close();
+                    return null;
+                }
+
+                var playerId = parts[0];
+                var voiceId = parts[1];
+
+                if (!ValidateVoiceID(playerId, voiceId) || !VerifyPlayerSession(playerId))
+                {
+                    Console.WriteLine($"SECURITY: Invalid connection attempt for player {playerId}");
+                    sender.Close();
+                    return null;
+                }
+
+                // Close existing connection if any
+                if (voiceConnections.ContainsKey(playerId))
+                {
+                    try
                     {
-                        Console.WriteLine("Invalid voice connect format - missing voiceID");
-                        sender.Close();
-                        return null;
+                        voiceConnections[playerId].Close();
+                    }
+                    catch { }
+                }
+
+                voiceConnections[playerId] = sender;
+                clientPlayerId = playerId;
+                playerVoiceEnabled[clientPlayerId] = true;
+
+                // Handle world transitions and group assignment
+                var playerPos = GetPlayerPosition(playerId);
+                if (playerPos != null)
+                {
+                    // Remove from old group if in different world
+                    if (playerToGroupMapping.ContainsKey(playerId))
+                    {
+                        var currentGroup = FindGroupByPlayerId(playerId);
+                        if (currentGroup != null && currentGroup.WorldId != playerPos.WorldId)
+                        {
+                            await RemovePlayerFromGroup(playerId);
+                        }
                     }
 
+                    // Assign to new group if in dungeon
+                    if (IsDungeon(playerPos.WorldId))
+                    {
+                        await AssignPlayerToVoiceGroup(playerId, playerPos.WorldId);
+                    }
+                }
+
+                Console.WriteLine($"Voice connection established for player {playerId}");
+                return playerId;
+            }
+            else if (message.StartsWith("VOICE_DISCONNECT:"))
+            {
+                var parts = message.Substring("VOICE_DISCONNECT:".Length).Split(':');
+                if (parts.Length >= 1)
+                {
                     var playerId = parts[0];
-                    var voiceId = parts[1];
-
-                    if (!ValidateVoiceID(playerId, voiceId))
-                    {
-                        Console.WriteLine($"SECURITY: Invalid VoiceID for player {playerId}");
-                        sender.Close();
-                        return null;
-                    }
-
-                    if (!VerifyPlayerSession(playerId))
-                    {
-                        Console.WriteLine($"SECURITY: Player {playerId} not in active game session");
-                        sender.Close();
-                        return null;
-                    }
-
-                    if (voiceConnections.ContainsKey(playerId))
-                    {
-                        Console.WriteLine($"SECURITY: Closing duplicate voice connection for player {playerId}");
-                        try
-                        {
-                            voiceConnections[playerId].Close();
-                        }
-                        catch
-                        {
-                        }
-                    }
-
-                    voiceConnections[playerId] = sender;
-                    clientPlayerId = playerId;
-                    playerVoiceEnabled[clientPlayerId] = true;
-
-                    // NEW: Handle dungeon grouping on connection
-                    var playerPos = GetPlayerPosition(playerId);
-                    if (playerPos != null && IsDungeon(playerPos.WorldId))
-                    {
-                        AssignPlayerToVoiceGroup(playerId, playerPos.WorldId);
-                    }
-
-                    Console.WriteLine($"Voice connection established for player {playerId}");
+                    playerVoiceEnabled[playerId] = false;
+                    voiceConnections.TryRemove(playerId, out _);
+                    await RemovePlayerFromGroup(playerId);
+                    
+                    Console.WriteLine($"Player {playerId} disconnected from voice system");
                     return playerId;
                 }
-
-
-                else if (message.StartsWith("VOICE_DISCONNECT:"))
-                {
-                    var parts = message.Substring("VOICE_DISCONNECT:".Length).Split(':');
-                    if (parts.Length >= 1)
-                    {
-                        var playerId = parts[0];
-                        playerVoiceEnabled[playerId] = false;
-                        voiceConnections.TryRemove(playerId, out _);
-
-                        // NEW: Remove from voice group
-                        RemovePlayerFromGroup(playerId);
-
-                        Console.WriteLine($"Player {playerId} disconnected from voice system");
-                        return playerId;
-                    }
-                }
             }
-            catch (Exception ex)
+            else if (message == "HEARTBEAT")
             {
-                Console.WriteLine($"Error processing voice message: {ex.Message}");
+                // Heartbeat received - connection is alive
+                return clientPlayerId;
             }
-
-            return clientPlayerId;
         }
-    
-
-private void AssignPlayerToVoiceGroup(string playerId, int worldId)
-{
-    if (!playerVoiceEnabled.GetValueOrDefault(playerId, true))
-    {
-        Console.WriteLine($"Player {playerId} has voice disabled - not adding to group");
-        return;
-    }
-    if (!dungeonVoiceGroups.ContainsKey(worldId))
-    {
-        dungeonVoiceGroups[worldId] = new List<VoiceGroup>();
-    }
-    
-    var groups = dungeonVoiceGroups[worldId];
-    var availableGroup = groups.FirstOrDefault(g => g.PlayerIds.Count < g.MaxSize);
-    
-    if (availableGroup == null)
-    {
-        // Create new group
-        availableGroup = new VoiceGroup
+        catch (Exception ex)
         {
-            WorldId = worldId,
-            MaxSize = 4
-        };
-        groups.Add(availableGroup);
+            Console.WriteLine($"Error processing voice message: {ex.Message}");
+        }
+
+        return clientPlayerId;
     }
+      
+
+// Helper methods you'll need to add:
+private VoiceGroup FindGroupByPlayerId(string playerId)
+{
+    if (!playerToGroupMapping.ContainsKey(playerId)) return null;
     
-    availableGroup.PlayerIds.Add(playerId);
-    playerToGroupMapping[playerId] = availableGroup.GroupId;
-    
-    Console.WriteLine($"Player {playerId} assigned to group {availableGroup.GroupId} (size: {availableGroup.PlayerIds.Count})");
+    var groupId = playerToGroupMapping[playerId];
+    foreach (var worldGroups in dungeonVoiceGroups.Values)
+    {
+        var group = worldGroups.FirstOrDefault(g => g.GroupId == groupId);
+        if (group != null) return group;
+    }
+    return null;
 }
 
+private void CheckForEmptyGroup(int worldId)
+{
+    if (!dungeonVoiceGroups.ContainsKey(worldId)) return;
+    
+    var groups = dungeonVoiceGroups[worldId];
+    var emptyGroups = groups.Where(g => g.PlayerIds.Count == 0).ToList();
+    
+    foreach (var emptyGroup in emptyGroups)
+    {
+        groups.Remove(emptyGroup);
+        Console.WriteLine($"Removed empty voice group {emptyGroup.GroupId} from world {worldId}");
+    }
+    
+    if (groups.Count == 0)
+    {
+        dungeonVoiceGroups.TryRemove(worldId, out _);
+        Console.WriteLine($"Removed all voice groups for world {worldId}");
+    }
+}
+
+public async Task<bool> AssignPlayerToVoiceGroup(string playerId, int worldId)
+{
+    var operation = new GroupOperation
+    {
+        Type = GroupOperationType.JoinGroup,
+        PlayerId = playerId,
+        WorldId = worldId
+    };
+        
+    groupOperationQueue.Enqueue(operation);
+    return await operation.CompletionSource.Task;
+}
         private PlayerPosition GetPlayerPosition(string playerId)
         {
             try
@@ -494,6 +752,33 @@ private void AssignPlayerToVoiceGroup(string playerId, int worldId)
                 return false;
             }
         }
+        public async Task CleanupVoiceGroupsForWorld(int worldId)
+        {
+            var operation = new GroupOperation
+            {
+                Type = GroupOperationType.CleanupWorld,
+                WorldId = worldId
+            };
+        
+            groupOperationQueue.Enqueue(operation);
+            await operation.CompletionSource.Task;
+        }
+        private void CleanupVoiceGroupsForWorldInternal(int worldId)
+        {
+            if (dungeonVoiceGroups.ContainsKey(worldId))
+            {
+                var groups = dungeonVoiceGroups[worldId];
+                foreach (var group in groups)
+                {
+                    foreach (var playerId in group.PlayerIds)
+                    {
+                        playerToGroupMapping.TryRemove(playerId, out _);
+                    }
+                }
+                dungeonVoiceGroups.TryRemove(worldId, out _);
+                Console.WriteLine($"Cleaned up voice groups for completed world {worldId}");
+            }
+        }
         private VoiceGroup FindGroupById(string groupId, int worldId)
         {
             if (!dungeonVoiceGroups.ContainsKey(worldId)) return null;
@@ -579,7 +864,21 @@ private void AssignPlayerToVoiceGroup(string playerId, int worldId)
             }
         }
 
-    
+        public void Dispose()
+        {
+            cleanupTimer?.Dispose();
+            heartbeatTimer?.Dispose();
+        
+            // Close all connections
+            foreach (var connection in voiceConnections.Values)
+            {
+                try
+                {
+                    connection.Close();
+                }
+                catch { }
+            }
+        }
 
        
         
