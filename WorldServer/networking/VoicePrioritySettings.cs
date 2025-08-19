@@ -65,7 +65,28 @@ namespace WorldServer.networking
                 ActivationThreshold = this.ActivationThreshold
             };
         }
+        public bool ShouldFilterVoice(bool hasPriority)
+        {
+            if (!EnablePriority) 
+                return false; // Priority system disabled, don't filter
+    
+            float volumeMultiplier = this.GetVolumeMultiplier(hasPriority);
+            return volumeMultiplier <= 0.001f; // Volume effectively zero, filter completely
+        }
 
+// OPTIONAL: Add this method for debugging/logging
+        public string GetFilterReason(bool hasPriority)
+        {
+            if (!EnablePriority) 
+                return "Priority system disabled";
+    
+            if (hasPriority)
+                return $"Priority player (volume: {PriorityVolume:F2})";
+            else if (NonPriorityVolume <= 0.001f)
+                return "Non-priority player filtered (volume: 0)";
+            else
+                return $"Non-priority player (volume: {NonPriorityVolume:F2})";
+        }
         // Validate settings (ensure they're within reasonable bounds)
         // Validate settings (ensure they're within reasonable bounds)
         public void ValidateSettings()
