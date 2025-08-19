@@ -427,47 +427,54 @@ namespace WorldServer.networking
         }
         
         private async Task ProcessVoiceDataPacket(byte[] packet, IPEndPoint clientEndpoint)
+{
+    try
+    {
+        // Voice packet format: [16 bytes playerId][Opus audio data]
+        string playerId = Encoding.UTF8.GetString(packet, 0, 16).Trim('\0').Trim(); // ← Added .Trim()
+        
+        Console.WriteLine($"UDP: Voice packet from player '{playerId}' at {clientEndpoint}");
+        Console.WriteLine($"UDP: Player authenticated? {authenticatedPlayers.ContainsKey(playerId)}");
+        
+        // Security check: Player must be authenticated
+        if (!authenticatedPlayers.ContainsKey(playerId))
         {
-            try
-            {
-                // Voice packet format: [16 bytes playerId][Opus audio data]
-                string playerId = Encoding.UTF8.GetString(packet, 0, 16).Trim('\0');
-                
-                // Security check: Player must be authenticated
-                if (!authenticatedPlayers.ContainsKey(playerId))
-                {
-                    Console.WriteLine($"UDP: Rejecting voice from unauthenticated player {playerId}");
-                    return;
-                }
-                
-                // Extract Opus audio data
-                byte[] opusAudio = new byte[packet.Length - 16];
-                Array.Copy(packet, 16, opusAudio, 0, opusAudio.Length);
-                
-                // Update activity tracking
-                playerUdpEndpoints[playerId] = clientEndpoint;
-                lastUdpActivity[playerId] = DateTime.UtcNow;
-                
-                // Create voice data object
-                var voiceData = new UdpVoiceData
-                {
-                    PlayerId = playerId,
-                    OpusAudioData = opusAudio,
-                    Volume = 1.0f,
-                    Timestamp = DateTime.UtcNow
-                };
-                
-                // Broadcast to nearby players with all features
-                await BroadcastVoiceToNearbyPlayers(voiceData);
-                
-                Console.WriteLine($"UDP: Processed {opusAudio.Length} Opus bytes from {playerId}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"UDP voice data processing error: {ex.Message}");
-            }
+            Console.WriteLine($"UDP: Rejecting voice from unauthenticated player '{playerId}'");
+            Console.WriteLine($"UDP: Auth endpoint for {playerId}: {playerUdpEndpoints.GetValueOrDefault(playerId)}");
+            Console.WriteLine($"UDP: Voice endpoint: {clientEndpoint}");
+            Console.WriteLine($"UDP: Authenticated players: {string.Join(", ", authenticatedPlayers.Keys.Select(k => $"'{k}'"))}");
+            return;
         }
         
+        Console.WriteLine($"UDP: Voice packet ACCEPTED from player '{playerId}'");
+        
+        // Extract Opus audio data
+        byte[] opusAudio = new byte[packet.Length - 16];
+        Array.Copy(packet, 16, opusAudio, 0, opusAudio.Length);
+        
+        // Update activity tracking AFTER authentication check
+        playerUdpEndpoints[playerId] = clientEndpoint;
+        lastUdpActivity[playerId] = DateTime.UtcNow;
+        
+        // Create voice data object
+        var voiceData = new UdpVoiceData
+        {
+            PlayerId = playerId,
+            OpusAudioData = opusAudio,
+            Volume = 1.0f,
+            Timestamp = DateTime.UtcNow
+        };
+        
+        // Broadcast to nearby players with all features
+        await BroadcastVoiceToNearbyPlayers(voiceData);
+        
+        Console.WriteLine($"UDP: Processed {opusAudio.Length} Opus bytes from player '{playerId}'");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"UDP voice data processing error: {ex.Message}");
+    }
+}
         private async Task BroadcastVoiceToNearbyPlayers(UdpVoiceData voiceData)
         {
             try
